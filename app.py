@@ -14,7 +14,7 @@ def hash_password(password):
     """Encripta la contraseña usando SHA-256 para mayor seguridad."""
     return hashlib.sha256(password.encode()).hexdigest()
 
-# --- CONEXIÓN A LA BASE DE DATOS Y AUTO-CREACIÓN DE TABLAS ---
+# --- CONEXIÓN A LA BASE DE DATOS Y AUTO-CREACIÓN/ACTUALIZACIÓN DE TABLAS ---
 def get_db_connection():
     return mysql.connector.connect(
         host=st.secrets["mysql"]["host"],
@@ -29,13 +29,12 @@ def inicializar_bd():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # 1. Tabla de Usuarios (Con soporte para Login y Roles)
+        # 1. Crear tabla de Usuarios si no existe
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 nombre VARCHAR(100) NOT NULL,
                 correo VARCHAR(100) UNIQUE NOT NULL,
-                password_hash VARCHAR(255) NOT NULL,
                 region VARCHAR(50) DEFAULT 'Lima',
                 colegio VARCHAR(100),
                 nivel_educativo VARCHAR(30),
@@ -44,6 +43,12 @@ def inicializar_bd():
                 creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        
+        # Comprobar y agregar la columna password_hash si la tabla ya existía sin ella
+        cursor.execute("SHOW COLUMNS FROM usuarios LIKE 'password_hash';")
+        resultado = cursor.fetchone()
+        if not resultado:
+            cursor.execute("ALTER TABLE usuarios ADD COLUMN password_hash VARCHAR(255) NOT NULL;")
         
         # 2. Tabla de Planificaciones Guardadas
         cursor.execute("""
@@ -99,7 +104,7 @@ if not st.session_state.logged_in:
                     cursor.close()
                     conn.close()
                     
-                    if user and user["password_hash"] == hash_password(pass_login):
+                    if user and user.get("password_hash") and user["password_hash"] == hash_password(pass_login):
                         st.session_state.logged_in = True
                         st.session_state.user_id = user["id"]
                         st.session_state.user_name = user["nombre"]
@@ -115,11 +120,11 @@ if not st.session_state.logged_in:
                 
     with tab_register:
         st.subheader("Crear Cuenta Nueva")
-        nombre_reg = st.text_input("Nombre completo")
+        nombre_reg = st.text_input("Nombre completo", key="reg_nombre")
         email_reg = st.text_input("Correo electrónico", key="reg_email")
         pass_reg = st.text_input("Contraseña", type="password", key="reg_pass")
-        nivel_reg = st.selectbox("Nivel en el que enseñas", ["Inicial", "Primaria", "Secundaria"])
-        colegio_reg = st.text_input("Nombre de tu Institución Educativa")
+        nivel_reg = st.selectbox("Nivel en el que enseñas", ["Inicial", "Primaria", "Secundaria"], key="reg_nivel")
+        colegio_reg = st.text_input("Nombre de tu Institución Educativa", key="reg_colegio")
         
         if st.button("Registrarme", type="primary"):
             if nombre_reg and email_reg and pass_reg:
@@ -143,7 +148,7 @@ if not st.session_state.logged_in:
             else:
                 st.warning("Por favor completa los campos obligatorios.")
                 
-    st.stop() # Detiene la ejecución aquí para que no muestre el panel si no ha hecho login
+    st.stop()
 
 # --- APLICACIÓN PRINCIPAL (UNA VEZ LOGUEADO) ---
 with st.sidebar:
@@ -171,7 +176,6 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "⚙️ Administración / Backup BD"
 ])
 
-# --- TAB 1: GENERADOR DE SESIONES ---
 with tab1:
     st.write("### Crear Nueva Sesión de Aprendizaje")
     col1, col2 = st.columns(2)
@@ -200,7 +204,6 @@ with tab1:
             response = model.generate_content(prompt)
             resultado_texto = response.text
             
-            # Guardar en MySQL asociado al usuario actual
             try:
                 conn = get_db_connection()
                 cursor = conn.cursor()
@@ -234,7 +237,6 @@ with tab1:
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
 
-# --- TAB 2: REVISOR DE DOCS ---
 with tab2:
     st.write("### Revisor de Documentos Pedagógicos")
     archivo_subido = st.file_uploader("Sube tu sesión o unidad actual (Word)", type=["docx"])
@@ -242,7 +244,6 @@ with tab2:
         st.info("La IA está evaluando el documento según la matriz CNEB...")
         st.warning("⚠️ Observación: Verificar coherencia entre el desempeño y el instrumento de evaluación.")
 
-# --- TAB 3: COPILOTO IA ---
 with tab3:
     st.write("### Copiloto Conversacional Docente")
     user_chat = st.text_input("¿Qué ajuste deseas realizar a tu planificación?")
@@ -250,7 +251,6 @@ with tab3:
         st.chat_message("user").write(user_chat)
         st.chat_message("assistant").write("Entendido. He adaptado la sesión para incluir dinámicas de trabajo grupal.")
 
-# --- TAB 4: ADMINISTRACIÓN Y BACKUP DE BD ---
 with tab4:
     st.write("### ⚙️ Centro de Respaldo y Recuperación de Datos")
     st.info("Desde aquí puedes descargar copias de seguridad de los registros y planificaciones de la plataforma.")
@@ -262,7 +262,7 @@ with tab4:
             df_planificaciones = pd.read_sql("SELECT * FROM planificaciones;", conn)
             conn.close()
             
-            st.write("#### 1. Tabla de Usuarios Registrados (Sin contraseñas por seguridad)")
+            st.write("#### 1. Tabla de Usuarios Registrados")
             st.dataframe(df_usuarios)
             
             st.write("#### 2. Tabla de Planificaciones Generadas")
