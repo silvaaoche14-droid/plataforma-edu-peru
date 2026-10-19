@@ -220,7 +220,7 @@ try:
     db_connected = init_db()
 except Exception as e:
     db_connected = False
-    st.error(f"⚠️ No se pudo conectar a la base de datos: {type(e).__name__}")
+    st.error(f"⚠️ {type(e).__name__}: {e}")
     st.stop()
 
 
