@@ -97,9 +97,9 @@ def init_db():
 
 try:
     db_connected = init_db()
-except Exception:
+except Exception as e:
     db_connected = False
-    st.error("⚠️ No se pudo conectar a la base de datos. Revisa los Secrets.")
+    st.error(f"⚠️ {type(e).__name__}: {e}")
     st.stop()
 
 
