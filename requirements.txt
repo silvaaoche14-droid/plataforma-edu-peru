@@ -5,3 +5,4 @@ google-generativeai
 python-docx
 bcrypt
 requests
+beautifulsoup4
