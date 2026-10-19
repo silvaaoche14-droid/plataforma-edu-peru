@@ -1,6 +1,7 @@
 streamlit
 mysql-connector-python
 pandas
-openpyxl
-python-docx
 google-generativeai
+python-docx
+bcrypt
+requests
