@@ -1,0 +1,6 @@
+streamlit
+mysql-connector-python
+pandas
+openpyxl
+python-docx
+google-generativeai
