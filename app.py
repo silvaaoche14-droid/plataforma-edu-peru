@@ -1,5 +1,6 @@
 import io
 import hashlib
+from typing import Optional
 
 import bcrypt
 import pandas as pd
@@ -201,8 +202,26 @@ def init_db():
             aprobado_en DATETIME NULL
         );
     """)
+
+    # Columnas que pueden faltar si las tablas se crearon con versiones anteriores
+    _asegurar_columna(cur, "usuarios", "nombre", "VARCHAR(100)")
+    _asegurar_columna(cur, "usuarios", "correo", "VARCHAR(100)")
+    _asegurar_columna(cur, "usuarios", "password_hash", "VARCHAR(255)")
+    _asegurar_columna(cur, "usuarios", "region", "VARCHAR(50) DEFAULT 'Lima'")
+    _asegurar_columna(cur, "usuarios", "colegio", "VARCHAR(100)")
+    _asegurar_columna(cur, "usuarios", "nivel_educativo", "VARCHAR(30)")
+    _asegurar_columna(cur, "usuarios", "rol", "VARCHAR(30) DEFAULT 'docente'")
+    _asegurar_columna(cur, "usuarios", "creditos", "INT DEFAULT 50")
+    _asegurar_columna(cur, "usuarios", "creado_en", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
     _asegurar_columna(cur, "usuarios", "colegio_id", "INT NULL")
     _asegurar_columna(cur, "usuarios", "activo", "TINYINT(1) DEFAULT 1")
+
+    _asegurar_columna(cur, "planificaciones", "usuario_id", "INT")
+    _asegurar_columna(cur, "planificaciones", "tipo_documento", "VARCHAR(50)")
+    _asegurar_columna(cur, "planificaciones", "titulo", "VARCHAR(255)")
+    _asegurar_columna(cur, "planificaciones", "contenido_texto", "LONGTEXT")
+    _asegurar_columna(cur, "planificaciones", "normativa_usada", "VARCHAR(255) DEFAULT 'RM N.° 501-2025-MINEDU'")
+    _asegurar_columna(cur, "planificaciones", "creado_en", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
     cur.execute("ALTER TABLE planificaciones MODIFY normativa_usada VARCHAR(255) DEFAULT 'RM N.° 501-2025-MINEDU'")
 
     cur.execute("SELECT COUNT(*) FROM normativa_fuentes")
@@ -281,7 +300,7 @@ def html_a_texto(html: str) -> str:
     return " ".join(soup.get_text(" ").split())
 
 
-def resumir_cambios(nombre: str, nuevo: str, anterior: str | None) -> str:
+def resumir_cambios(nombre: str, nuevo: str, anterior: Optional[str]) -> str:
     if anterior:
         prompt = f"""Compara dos capturas de texto de la fuente oficial «{nombre}» (MINEDU, Perú).
 Indica SOLO los cambios relevantes para docentes y colegios y clasifícalos en:
@@ -342,7 +361,7 @@ def normativa_vigente():
     filas = db_fetch(
         "SELECT f.nombre, v.resumen_cambios, v.aprobado_en FROM normativa_versiones v "
         "JOIN normativa_fuentes f ON f.id = v.fuente_id "
-        "WHERE v.estado='approved' OR v.estado='aprobada' ORDER BY v.aprobado_en DESC LIMIT 5"
+        "WHERE v.estado='aprobada' ORDER BY v.aprobado_en DESC LIMIT 5"
     )
     if not filas:
         return "", "RM N.° 501-2025-MINEDU"
@@ -357,7 +376,7 @@ def normativa_vigente():
 # ------------------------------------------------------------------
 # EXPORTAR A WORD
 # ------------------------------------------------------------------
-def texto_a_docx(titulo: str, contenido: str, pie: str | None = None) -> bytes:
+def texto_a_docx(titulo: str, contenido: str, pie: Optional[str] = None) -> bytes:
     doc = Document()
     doc.add_heading(titulo, level=0)
     for linea in contenido.splitlines():
@@ -611,7 +630,7 @@ def panel_usuarios(admin_id: int):
             actual = u["colegio_id"] or 0
             e_col = c1.selectbox("Colegio", claves_col, index=claves_col.index(actual) if actual in claves_col else 0,
                                  format_func=lambda k: colegios[k], key=f"ec_{uid}")
-            e_cred = c2.number_input("Créditos", 0, 100000, int(u["creditos"]), key=f"ecr_{uid}")
+            e_cred = c2.number_input("Créditos", 0, 100000, int(u["creditos"] or 0), key=f"ecr_{uid}")
             e_activo = c1.checkbox("Cuenta activa", bool(u["activo"]), key=f"ea_{uid}")
             e_pw = c2.text_input("Nueva contraseña (opcional)", type="password", key=f"ep_{uid}")
             guardar = st.form_submit_button("Guardar cambios", type="primary")
