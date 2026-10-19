@@ -4,10 +4,15 @@ import pandas as pd
 import google.generativeai as genai
 from docx import Document
 import io
-import json
+import hashlib
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="EduPerú IA - Portal Docente", layout="wide", page_icon="✏️")
+
+# --- FUNCIONES DE SEGURIDAD Y HASH ---
+def hash_password(password):
+    """Encripta la contraseña usando SHA-256 para mayor seguridad."""
+    return hashlib.sha256(password.encode()).hexdigest()
 
 # --- CONEXIÓN A LA BASE DE DATOS Y AUTO-CREACIÓN DE TABLAS ---
 def get_db_connection():
@@ -20,41 +25,27 @@ def get_db_connection():
     )
 
 def inicializar_bd():
-    """Crea automáticamente las tablas en MySQL si no existen."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # 1. Tabla de Usuarios (Docentes)
+        # 1. Tabla de Usuarios (Con soporte para Login y Roles)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 nombre VARCHAR(100) NOT NULL,
                 correo VARCHAR(100) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
                 region VARCHAR(50) DEFAULT 'Lima',
                 colegio VARCHAR(100),
                 nivel_educativo VARCHAR(30),
+                rol VARCHAR(30) DEFAULT 'docente',
                 creditos INT DEFAULT 50,
                 creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
         
-        # 2. Matriz Curricular CNEB
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS cneb_competencias (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                area VARCHAR(50) NOT NULL,
-                nivel VARCHAR(20) NOT NULL,
-                grado VARCHAR(20) NOT NULL,
-                competencia VARCHAR(255) NOT NULL,
-                capacidad TEXT,
-                desempenio TEXT,
-                estandar TEXT,
-                version_normativa VARCHAR(50) DEFAULT 'RM N.° 501-2025-MINEDU'
-            );
-        """)
-        
-        # 3. Tabla de Planificaciones Guardadas
+        # 2. Tabla de Planificaciones Guardadas
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS planificaciones (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -73,26 +64,104 @@ def inicializar_bd():
     except Exception as e:
         st.error(f"Error al conectar/inicializar la BD: {e}")
 
-# Ejecutar inicialización
 inicializar_bd()
 
 # --- CONFIGURACIÓN DE IA ---
 genai.configure(api_key=st.secrets["gemini"]["api_key"])
 model = genai.GenerativeModel('gemini-1.5-pro')
 
-# --- MENÚ LATERAL ---
+# --- CONTROL DE SESIÓN (LOGIN) ---
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+    st.session_state.user_id = None
+    st.session_state.user_name = ""
+    st.session_state.user_email = ""
+
+# --- PANTALLA DE LOGIN / REGISTRO SI NO HA INICIADO SESIÓN ---
+if not st.session_state.logged_in:
+    st.title("🔐 EduPerú IA - Acceso al Sistema")
+    st.markdown("Plataforma Pedagógica Inteligente alineada al **CNEB y RM N.° 501-2025-MINEDU**.")
+    
+    tab_login, tab_register = st.tabs(["🔑 Iniciar Sesión", "📝 Registrarse"])
+    
+    with tab_login:
+        st.subheader("Iniciar Sesión Docente")
+        email_login = st.text_input("Correo electrónico", key="login_email")
+        pass_login = st.text_input("Contraseña", type="password", key="login_pass")
+        
+        if st.button("Ingresar al Sistema", type="primary"):
+            if email_login and pass_login:
+                try:
+                    conn = get_db_connection()
+                    cursor = conn.cursor(dictionary=True)
+                    cursor.execute("SELECT * FROM usuarios WHERE correo = %s", (email_login,))
+                    user = cursor.fetchone()
+                    cursor.close()
+                    conn.close()
+                    
+                    if user and user["password_hash"] == hash_password(pass_login):
+                        st.session_state.logged_in = True
+                        st.session_state.user_id = user["id"]
+                        st.session_state.user_name = user["nombre"]
+                        st.session_state.user_email = user["correo"]
+                        st.success(f"¡Bienvenido de nuevo, {user['nombre']}!")
+                        st.rerun()
+                    else:
+                        st.error("Correo o contraseña incorrectos.")
+                except Exception as e:
+                    st.error(f"Error en la base de datos: {e}")
+            else:
+                st.warning("Por favor completa todos los campos.")
+                
+    with tab_register:
+        st.subheader("Crear Cuenta Nueva")
+        nombre_reg = st.text_input("Nombre completo")
+        email_reg = st.text_input("Correo electrónico", key="reg_email")
+        pass_reg = st.text_input("Contraseña", type="password", key="reg_pass")
+        nivel_reg = st.selectbox("Nivel en el que enseñas", ["Inicial", "Primaria", "Secundaria"])
+        colegio_reg = st.text_input("Nombre de tu Institución Educativa")
+        
+        if st.button("Registrarme", type="primary"):
+            if nombre_reg and email_reg and pass_reg:
+                try:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    hashed_pw = hash_password(pass_reg)
+                    cursor.execute(
+                        "INSERT INTO usuarios (nombre, correo, password_hash, nivel_educativo, colegio) VALUES (%s, %s, %s, %s, %s)",
+                        (nombre_reg, email_reg, hashed_pw, nivel_reg, colegio_reg)
+                    )
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    st.success("¡Cuenta creada con éxito! Ya puedes iniciar sesión en la pestaña de al lado.")
+                except mysql.connector.Error as err:
+                    if err.errno == 1062:
+                        st.error("Este correo ya está registrado en el sistema.")
+                    else:
+                        st.error(f"Error al registrar: {err}")
+            else:
+                st.warning("Por favor completa los campos obligatorios.")
+                
+    st.stop() # Detiene la ejecución aquí para que no muestre el panel si no ha hecho login
+
+# --- APLICACIÓN PRINCIPAL (UNA VEZ LOGUEADO) ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3429/3429149.png", width=70)
     st.title("EduPerú IA 🇵🇪")
-    st.caption("Alineado a la **RM N.° 501-2025-MINEDU**")
-    st.divider()
+    st.write(f"👤 **{st.session_state.user_name}**")
+    st.caption(f"📧 {st.session_state.user_email}")
     
+    if st.button("🚪 Cerrar Sesión"):
+        st.session_state.logged_in = False
+        st.rerun()
+        
+    st.divider()
     nivel = st.selectbox("Nivel Educativo", ["Inicial", "Primaria", "Secundaria"])
     grado = st.selectbox("Grado / Edad", ["1.° grado", "2.° grado", "3.° grado", "4.° grado", "5.° grado", "6.° grado"])
     area = st.selectbox("Área Curricular", ["Matemática", "Comunicación", "Ciencia y Tecnología", "Personal Social", "Tutoría"])
     region = st.selectbox("Región / Contexto", ["Lima", "Piura", "Cusco", "Loreto", "Puno", "Arequipa"])
 
-# --- CONTENIDO PRINCIPAL ---
 st.title("🇵🇪 Asistente Pedagógico CNEB")
 
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -116,7 +185,7 @@ with tab1:
         with st.spinner("Consultando CNEB y redactando estructura pedagógica..."):
             prompt = f"""
             Actúa como un Especialista Pedagógico del MINEDU Perú.
-            Genera una Sesión de Aprendizaje alineada al CNEB y a la norma vigente.
+            Genera una Sesión de Aprendizaje alineada al CNEB y a la norma vigente (RM N.° 501-2025-MINEDU).
             
             DATOS DE ENTRADA:
             - Nivel: {nivel} | Grado: {grado} | Área: {area} | Región: {region}
@@ -131,27 +200,26 @@ with tab1:
             response = model.generate_content(prompt)
             resultado_texto = response.text
             
-            # Guardar en MySQL
+            # Guardar en MySQL asociado al usuario actual
             try:
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 cursor.execute(
-                    "INSERT INTO planificaciones (tipo_documento, titulo, contenido_texto) VALUES (%s, %s, %s)",
-                    ("Sesion", titulo_sesion, resultado_texto)
+                    "INSERT INTO planificaciones (usuario_id, tipo_documento, titulo, contenido_texto) VALUES (%s, %s, %s, %s)",
+                    (st.session_state.user_id, "Sesion", titulo_sesion, resultado_texto)
                 )
                 conn.commit()
                 cursor.close()
                 conn.close()
-                st.success("¡Sesión generada y guardada en la Base de Datos MySQL!")
+                st.success("¡Sesión generada y guardada de forma segura en la Base de Datos!")
             except Exception as e:
                 st.warning(f"Generado pero no se pudo guardar en BD: {e}")
 
             st.markdown(resultado_texto)
             
-            # Exportar a Word
             doc = Document()
             doc.add_heading(f'SESIÓN DE APRENDIZAJE - {area.upper()}', 0)
-            doc.add_paragraph(f'Grado: {grado} | Nivel: {nivel} | Región: {region}')
+            doc.add_paragraph(f'Docente: {st.session_state.user_name} | Grado: {grado} | Nivel: {nivel} | Región: {region}')
             doc.add_paragraph(f'Normativa: RM N.° 501-2025-MINEDU\n')
             doc.add_paragraph(resultado_texto)
             
@@ -185,24 +253,21 @@ with tab3:
 # --- TAB 4: ADMINISTRACIÓN Y BACKUP DE BD ---
 with tab4:
     st.write("### ⚙️ Centro de Respaldo y Recuperación de Datos")
-    st.info("Desde aquí puedes descargar copias de seguridad de todas las tablas guardadas en Aiven MySQL.")
+    st.info("Desde aquí puedes descargar copias de seguridad de los registros y planificaciones de la plataforma.")
     
     if st.button("🔄 Cargar datos de la Base de Datos"):
         try:
             conn = get_db_connection()
-            
-            # Cargar tablas en DataFrames de pandas
-            df_usuarios = pd.read_sql("SELECT * FROM usuarios;", conn)
+            df_usuarios = pd.read_sql("SELECT id, nombre, correo, region, colegio, nivel_educativo, creado_en FROM usuarios;", conn)
             df_planificaciones = pd.read_sql("SELECT * FROM planificaciones;", conn)
             conn.close()
             
-            st.write("#### 1. Tabla de Usuarios Registrados")
+            st.write("#### 1. Tabla de Usuarios Registrados (Sin contraseñas por seguridad)")
             st.dataframe(df_usuarios)
             
             st.write("#### 2. Tabla de Planificaciones Generadas")
             st.dataframe(df_planificaciones)
             
-            # --- EXPORTAR A EXCEL (.xlsx) ---
             output_excel = io.BytesIO()
             with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
                 df_usuarios.to_excel(writer, sheet_name='Usuarios', index=False)
@@ -215,18 +280,5 @@ with tab4:
                 file_name="Respaldo_BaseDeDatos_EduPeru.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-            
-            # --- EXPORTAR A SQL (.sql) ---
-            sql_backup = "-- RESPALDO DE SEGURIDAD EDUPERU IA\n\n"
-            for _, row in df_planificaciones.iterrows():
-                sql_backup += f"INSERT INTO planificaciones (tipo_documento, titulo, contenido_texto) VALUES ('{row['tipo_documento']}', '{row['titulo']}', '{row['contenido_texto']}');\n"
-            
-            st.download_button(
-                label="📥 Descargar Script de Respaldo en SQL (.sql)",
-                data=sql_backup,
-                file_name="backup_planificaciones.sql",
-                mime="text/plain"
-            )
-            
         except Exception as e:
             st.error(f"Error al leer la base de datos: {e}")
