@@ -1350,28 +1350,50 @@ elif pagina == PAG_ADMIN and es_admin:
 #| """Proveedores de IA (OpenRouter primero, Gemini de respaldo) y utilidades para pedir JSON."""
 #| import json
 #| import re
+#| import time
 #| import requests
 #| import streamlit as st
 #|
 #|
+#| def _post(url, **kw):
+#|     """POST con 3 intentos si el proveedor responde 429/503; el error incluye el mensaje real del proveedor."""
+#|     r = None
+#|     for intento in range(3):
+#|         r = requests.post(url, **kw)
+#|         if r.status_code in (429, 503) and intento < 2:
+#|             time.sleep(4 * (intento + 1))
+#|             continue
+#|         break
+#|     if r.status_code >= 400:
+#|         try:
+#|             detalle = r.json().get("error", {})
+#|             detalle = detalle.get("message", r.text) if isinstance(detalle, dict) else str(detalle)
+#|         except ValueError:
+#|             detalle = r.text
+#|         raise RuntimeError(f"{r.status_code}: {str(detalle)[:250]}")
+#|     return r
+#|
+#|
 #| def llamar_openrouter(prompt: str) -> str:
 #|     cfg = st.secrets["openrouter"]
-#|     resp = requests.post(
-#|         "https://openrouter.ai/api/v1/chat/completions",
-#|         headers={"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json"},
-#|         json={"model": cfg.get("model", "openai/gpt-4o-mini"),
-#|               "messages": [{"role": "user", "content": prompt}],
-#|               "max_tokens": 6000},
-#|         timeout=120,
-#|     )
-#|     resp.raise_for_status()
-#|     return resp.json()["choices"][0]["message"]["content"]
+#|     r = _post("https://openrouter.ai/api/v1/chat/completions",
+#|               headers={"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json"},
+#|               json={"model": cfg.get("model", "openai/gpt-4o-mini"),
+#|                     "messages": [{"role": "user", "content": prompt}], "max_tokens": 6000},
+#|               timeout=120)
+#|     return r.json()["choices"][0]["message"]["content"]
 #|
 #|
 #| def llamar_gemini(prompt: str) -> str:
-#|     import google.generativeai as genai
-#|     genai.configure(api_key=st.secrets["gemini"]["api_key"])
-#|     return genai.GenerativeModel("gemini-2.5-flash").generate_content(prompt).text
+#|     """Gemini por su API REST (no depende de ninguna librería). El modelo se puede cambiar en Secrets: [gemini] model."""
+#|     cfg = st.secrets["gemini"]
+#|     modelo = cfg.get("model", "gemini-3.8-flash")
+#|     r = _post(f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent",
+#|               params={"key": cfg["api_key"]},
+#|               json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 8000}},
+#|               timeout=120)
+#|     partes = r.json()["candidates"][0]["content"]["parts"]
+#|     return "".join(p.get("text", "") for p in partes)
 #|
 #|
 #| def generar_texto(prompt: str):
@@ -1631,7 +1653,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| import streamlit as st
 #| import streamlit.components.v1 as components
 #|
-#| from repo import cambiar_color, costo_de, get_asignacion, get_doc_by_id, get_usuario
+#| from repo import cambiar_color, costo_de, get_asignacion, get_doc_by_id, get_usuario, resumen_asignacion
 #| from render import COLORES, COLOR_DEFECTO, ICONO_COLOR, a_docx, a_html
 #| from exportar import bloques_de
 #|
@@ -1656,6 +1678,13 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     st.session_state["area_id"] = aid
 #|     if pagina:
 #|         st.session_state["nav"] = pagina
+#|
+#|
+#| def abrir_siguiente(aid):
+#|     """Activa el área y te lleva al siguiente paso pendiente (anual → unidades → sesiones)."""
+#|     r = resumen_asignacion(aid)
+#|     pagina = PAG_ANUAL if not r.get("anual") else PAG_UNIDADES if not r.get("unidad") else PAG_SESIONES
+#|     abrir_area(aid, pagina)
 #|
 #|
 #| def flash(mensaje, tipo="success"):
@@ -1786,7 +1815,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #| from curriculo import GRADOS, NIVELES, REGIONES, areas_de, estado_area
 #| from repo import borrar_asignacion, crear_asignacion, get_usuario, listar_asignaciones, resumen_asignacion
-#| from ui import PAG_ANUAL, abrir_area, flash
+#| from ui import PAG_ANUAL, abrir_area, abrir_siguiente, flash
 #|
 #|
 #| def _pasos(aid):
@@ -1863,8 +1892,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                         st.caption(f"{a['grado']} · Sección {a['seccion'] or '—'} · {a['ciclo_escolar']}")
 #|                         r = resumen_asignacion(a["id"])
 #|                         st.caption(f"📅 {'✅' if r.get('anual') else '⬜'}  📚 {r.get('unidad', 0)}  📝 {r.get('sesion', 0)}")
-#|                         st.button("Abrir", key=f"abrir_{a['id']}", on_click=abrir_area, args=(a["id"],),
-#|                                   use_container_width=True)
+#|                         st.button("Abrir ▶", key=f"abrir_{a['id']}", on_click=abrir_siguiente, args=(a["id"],),
+#|                                   use_container_width=True, type="primary")
 #|
 #|     with st.expander("➕ Nueva área", expanded=not asigs):
 #|         st.caption("Estos datos aparecerán en todos tus documentos (los puedes cambiar después).")
