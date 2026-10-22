@@ -7,7 +7,7 @@ import linecache
 import sys
 import types
 
-_ORDEN = ['util', 'db', 'curriculo', 'repo', 'render', 'exportar', 'ia', 'normativa', 'auth', 'ui', 'v_panel', 'v_anual', 'v_unidades', 'v_sesiones', 'v_biblioteca', 'v_admin']
+_ORDEN = ['util', 'db', 'repo', 'curriculo', 'render', 'exportar', 'ia', 'normativa', 'programas', 'auth', 'ui', 'examen_unidad', 'v_curriculo', 'v_programas', 'v_panel', 'v_anual', 'v_unidades', 'v_sesiones', 'v_biblioteca', 'v_admin']
 
 
 def _cargar_modulos():
@@ -62,9 +62,10 @@ except Exception as e:
 
 from auth import pantalla_login  # noqa: E402
 from repo import get_usuario, listar_asignaciones  # noqa: E402
-from ui import (PAG_ADMIN, PAG_ANUAL, PAG_BIBLIO, PAG_PANEL, PAG_SESIONES, PAG_UNIDADES,  # noqa: E402
+from ui import (PAG_ADMIN, PAG_ANUAL, PAG_BIBLIO, PAG_CURRICULO, PAG_PANEL, PAG_SESIONES,  # noqa: E402
+                PAG_UNIDADES,
                 mostrar_flash)
-import v_admin, v_anual, v_biblioteca, v_panel, v_sesiones, v_unidades  # noqa: E402,E401
+import v_admin, v_anual, v_biblioteca, v_curriculo, v_panel, v_sesiones, v_unidades  # noqa: E402,E401
 
 if not st.session_state.get("logged_in"):
     pantalla_login()
@@ -89,7 +90,7 @@ with st.sidebar:
         st.rerun()
 
 # --- Navegación (arriba, visible también en el celular)
-paginas = [PAG_PANEL, PAG_ANUAL, PAG_UNIDADES, PAG_SESIONES, PAG_BIBLIO] + ([PAG_ADMIN] if es_admin else [])
+paginas = [PAG_PANEL, PAG_ANUAL, PAG_UNIDADES, PAG_SESIONES, PAG_CURRICULO, PAG_BIBLIO] + ([PAG_ADMIN] if es_admin else [])
 if st.session_state.get("nav") not in paginas:
     st.session_state["nav"] = PAG_PANEL
 pagina = st.radio("Menú", paginas, key="nav", horizontal=True, label_visibility="collapsed")
@@ -116,6 +117,8 @@ elif pagina == PAG_UNIDADES:
     v_unidades.render()
 elif pagina == PAG_SESIONES:
     v_sesiones.render()
+elif pagina == PAG_CURRICULO:
+    v_curriculo.render()
 elif pagina == PAG_BIBLIO:
     v_biblioteca.render()
 elif pagina == PAG_ADMIN and es_admin:
@@ -386,6 +389,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         nombre VARCHAR(500) NOT NULL,
 #|         orden INT DEFAULT 0,
 #|         verificado TINYINT(1) DEFAULT 0,
+#|         fuente VARCHAR(600),
+#|         verificado_en DATETIME NULL,
 #|         INDEX idx_comp_nivel_area (nivel, area)
 #|     )""",
 #|     """CREATE TABLE IF NOT EXISTS curriculo_capacidades (
@@ -408,6 +413,45 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         tipo VARCHAR(20) NOT NULL,
 #|         nombre VARCHAR(300) NOT NULL,
 #|         detalle TEXT
+#|     )""",
+#|     """CREATE TABLE IF NOT EXISTS curriculo_estandares (
+#|         id INT AUTO_INCREMENT PRIMARY KEY,
+#|         competencia_id INT NOT NULL,
+#|         ciclo VARCHAR(10) NOT NULL,
+#|         texto TEXT NOT NULL,
+#|         INDEX idx_est_comp (competencia_id, ciclo)
+#|     )""",
+#|     """CREATE TABLE IF NOT EXISTS curriculo_pdf (
+#|         id INT AUTO_INCREMENT PRIMARY KEY,
+#|         url VARCHAR(600) NOT NULL,
+#|         titulo VARCHAR(300),
+#|         nivel VARCHAR(20),
+#|         origen VARCHAR(600),
+#|         firma VARCHAR(300),
+#|         hash_contenido VARCHAR(64),
+#|         paginas INT DEFAULT 0,
+#|         estado VARCHAR(20) DEFAULT 'nuevo',
+#|         detectado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+#|         leido_en DATETIME NULL
+#|     )""",
+#|     """CREATE TABLE IF NOT EXISTS curriculo_pdf_paginas (
+#|         id INT AUTO_INCREMENT PRIMARY KEY,
+#|         pdf_id INT NOT NULL,
+#|         pagina INT NOT NULL,
+#|         texto LONGTEXT,
+#|         INDEX idx_pag_pdf (pdf_id, pagina)
+#|     )""",
+#|     """CREATE TABLE IF NOT EXISTS curriculo_importado (
+#|         id INT AUTO_INCREMENT PRIMARY KEY,
+#|         pdf_id INT NOT NULL,
+#|         competencia_id INT NOT NULL,
+#|         tipo VARCHAR(12) NOT NULL,
+#|         grado VARCHAR(20) NOT NULL,
+#|         texto TEXT NOT NULL,
+#|         pagina INT DEFAULT 0,
+#|         estado VARCHAR(12) DEFAULT 'pendiente',
+#|         creado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+#|         INDEX idx_imp_pdf (pdf_id, estado)
 #|     )""",
 #|     """CREATE TABLE IF NOT EXISTS config (
 #|         clave VARCHAR(60) PRIMARY KEY,
@@ -438,6 +482,9 @@ elif pagina == PAG_ADMIN and es_admin:
 #|             _asegurar_columna(cur, "planificaciones", col, ddl)
 #|         cur.execute("ALTER TABLE planificaciones MODIFY normativa_usada VARCHAR(255) DEFAULT 'RM N.° 501-2025-MINEDU'")
 #|
+#|         for col, ddl in [("fuente", "VARCHAR(600)"), ("verificado_en", "DATETIME NULL")]:
+#|             _asegurar_columna(cur, "curriculo_competencias", col, ddl)
+#|
 #|         cur.execute("SELECT COUNT(*) FROM normativa_fuentes")
 #|         if cur.fetchone()[0] == 0:
 #|             for nombre, url, tipo in FUENTES_INICIALES:
@@ -452,6 +499,213 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         conn.close()
 #|     return True
 #@@ END
+#@@ MODULE repo
+#| """Acceso a datos: usuarios, créditos, asignaciones (áreas del docente) y documentos."""
+#| import json
+#| from db import fetch, execute
+#|
+#| ORDEN_NIVEL = {"Inicial": 0, "Primaria": 1, "Secundaria": 2}
+#|
+#| COSTOS_DEFAULT = {"caracterizacion": 0, "anual": 2, "unidad": 2, "sesion": 1,
+#|                   "rubrica": 1, "ficha": 1, "examen": 1, "examen_unidad": 2, "importar": 1, "revision": 1}
+#| NOMBRES_COSTO = {
+#|     "caracterizacion": "Boceto de caracterización del estudiante",
+#|     "anual": "Situaciones significativas (planificación anual)",
+#|     "unidad": "Unidad de aprendizaje",
+#|     "sesion": "Sesión de aprendizaje",
+#|     "rubrica": "Rúbrica de evaluación",
+#|     "ficha": "Ficha de trabajo",
+#|     "examen": "Examen de la sesión",
+#|     "examen_unidad": "Examen de unidad / bimestre",
+#|     "importar": "Importar unidad desde Word",
+#|     "revision": "Revisión de coherencia",
+#| }
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # Configuración y créditos
+#| # ------------------------------------------------------------------
+#| def config_get(clave, defecto=None):
+#|     f = fetch("SELECT valor FROM config WHERE clave=%s", (clave,), one=True)
+#|     return f["valor"] if f else defecto
+#|
+#|
+#| def config_set(clave, valor):
+#|     if fetch("SELECT clave FROM config WHERE clave=%s", (clave,), one=True):
+#|         execute("UPDATE config SET valor=%s WHERE clave=%s", (str(valor), clave))
+#|     else:
+#|         execute("INSERT INTO config (clave, valor) VALUES (%s, %s)", (clave, str(valor)))
+#|
+#|
+#| def costo_de(accion):
+#|     v = config_get(f"costo_{accion}")
+#|     try:
+#|         return int(v) if v is not None else COSTOS_DEFAULT.get(accion, 1)
+#|     except ValueError:
+#|         return COSTOS_DEFAULT.get(accion, 1)
+#|
+#|
+#| def get_usuario(uid):
+#|     return fetch("SELECT id, nombre, correo, rol, creditos, activo, colegio, colegio_id, nivel_educativo "
+#|                  "FROM usuarios WHERE id=%s", (uid,), one=True)
+#|
+#|
+#| def cobrar(uid, accion, veces=1):
+#|     """Descuenta créditos (el administrador no paga). Se llama DESPUÉS de que la IA respondió bien."""
+#|     u = get_usuario(uid)
+#|     if not u or u["rol"] == "admin":
+#|         return
+#|     costo = costo_de(accion) * veces
+#|     if costo > 0:
+#|         execute("UPDATE usuarios SET creditos = creditos - %s WHERE id=%s AND creditos >= %s", (costo, uid, costo))
+#|
+#|
+#| def mapa_colegios(solo_activos=True):
+#|     sql = "SELECT id, nombre FROM colegios" + (" WHERE activo=1" if solo_activos else "") + " ORDER BY nombre"
+#|     mapa = {0: "— Docente independiente / sin colegio —"}
+#|     mapa.update({c["id"]: c["nombre"] for c in fetch(sql)})
+#|     return mapa
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # Asignaciones (áreas del docente)
+#| # ------------------------------------------------------------------
+#| def listar_asignaciones(uid):
+#|     filas = fetch("SELECT * FROM asignaciones WHERE usuario_id=%s", (uid,))
+#|     return sorted(filas, key=lambda a: (ORDEN_NIVEL.get(a["nivel"], 9), a["grado"], a["area"], a["seccion"] or ""))
+#|
+#|
+#| def get_asignacion(aid):
+#|     return fetch("SELECT * FROM asignaciones WHERE id=%s", (aid,), one=True)
+#|
+#|
+#| def crear_asignacion(uid, d):
+#|     nuevo, _ = execute(
+#|         "INSERT INTO asignaciones (usuario_id, ciclo_escolar, institucion, director, docente, region, nivel, grado, area, seccion) "
+#|         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+#|         (uid, d["ciclo_escolar"], d["institucion"], d["director"], d["docente"], d["region"],
+#|          d["nivel"], d["grado"], d["area"], d["seccion"]))
+#|     return nuevo
+#|
+#|
+#| CAMPOS_ASIG = {"institucion", "director", "docente", "region", "seccion", "caracterizacion", "ciclo_escolar"}
+#|
+#|
+#| def actualizar_asignacion(aid, **campos):
+#|     campos = {k: v for k, v in campos.items() if k in CAMPOS_ASIG}
+#|     if not campos:
+#|         return
+#|     sets = ", ".join(f"{k}=%s" for k in campos)
+#|     execute(f"UPDATE asignaciones SET {sets} WHERE id=%s", tuple(campos.values()) + (aid,))
+#|
+#|
+#| def borrar_asignacion(aid):
+#|     execute("DELETE FROM documentos WHERE asignacion_id=%s", (aid,))
+#|     execute("DELETE FROM asignaciones WHERE id=%s", (aid,))
+#|
+#|
+#| def resumen_asignacion(aid):
+#|     filas = fetch("SELECT tipo, COUNT(*) AS n FROM documentos WHERE asignacion_id=%s GROUP BY tipo", (aid,))
+#|     return {f["tipo"]: f["n"] for f in filas}
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # Documentos
+#| # ------------------------------------------------------------------
+#| def contenido(doc):
+#|     if not doc or not doc.get("contenido"):
+#|         return {}
+#|     try:
+#|         return json.loads(doc["contenido"])
+#|     except (TypeError, ValueError):
+#|         return {}
+#|
+#|
+#| def get_doc_by_id(did):
+#|     if not did:
+#|         return None
+#|     return fetch("SELECT * FROM documentos WHERE id=%s", (did,), one=True)
+#|
+#|
+#| def get_doc(aid, tipo, numero=None, padre_id=None):
+#|     sql = "SELECT * FROM documentos WHERE asignacion_id=%s AND tipo=%s"
+#|     params = [aid, tipo]
+#|     if numero is not None:
+#|         sql += " AND numero=%s"
+#|         params.append(numero)
+#|     if padre_id is not None:
+#|         sql += " AND padre_id=%s"
+#|         params.append(padre_id)
+#|     sql += " ORDER BY id DESC LIMIT 1"
+#|     return fetch(sql, tuple(params), one=True)
+#|
+#|
+#| def listar_docs(aid, tipo=None, padre_id=None):
+#|     sql = "SELECT * FROM documentos WHERE asignacion_id=%s"
+#|     params = [aid]
+#|     if tipo:
+#|         sql += " AND tipo=%s"
+#|         params.append(tipo)
+#|     if padre_id is not None:
+#|         sql += " AND padre_id=%s"
+#|         params.append(padre_id)
+#|     sql += " ORDER BY numero, id"
+#|     return fetch(sql, tuple(params))
+#|
+#|
+#| def guardar_doc(uid, aid, tipo, numero, titulo, data, padre_id=None, color=None, normativa=None):
+#|     """Crea o actualiza un documento. Devuelve su id."""
+#|     clave_num = numero if tipo in ("unidad", "sesion", "examen_unidad") else None
+#|     clave_pad = padre_id if tipo in ("sesion", "rubrica", "ficha", "examen") else None
+#|     existente = get_doc(aid, tipo, clave_num, clave_pad)
+#|     texto = json.dumps(data, ensure_ascii=False)
+#|     titulo = (titulo or "")[:255]
+#|     if existente:
+#|         sets, params = ["titulo=%s", "contenido=%s", "numero=%s"], [titulo, texto, numero]
+#|         if color:
+#|             sets.append("color=%s")
+#|             params.append(color)
+#|         if normativa:
+#|             sets.append("normativa_usada=%s")
+#|             params.append(normativa[:255])
+#|         if padre_id is not None:
+#|             sets.append("padre_id=%s")
+#|             params.append(padre_id)
+#|         execute(f"UPDATE documentos SET {', '.join(sets)} WHERE id=%s", tuple(params) + (existente["id"],))
+#|         return existente["id"]
+#|     nuevo, _ = execute(
+#|         "INSERT INTO documentos (usuario_id, asignacion_id, tipo, padre_id, numero, titulo, contenido, color, normativa_usada) "
+#|         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+#|         (uid, aid, tipo, padre_id, numero, titulo, texto, color or "1F3B8F", (normativa or "")[:255]))
+#|     return nuevo
+#|
+#|
+#| def cambiar_color(did, color):
+#|     execute("UPDATE documentos SET color=%s WHERE id=%s", (color, did))
+#|
+#|
+#| def borrar_doc(did):
+#|     """Borra un documento y todo lo que depende de él."""
+#|     for hijo in fetch("SELECT id FROM documentos WHERE padre_id=%s", (did,)):
+#|         borrar_doc(hijo["id"])
+#|     execute("DELETE FROM documentos WHERE id=%s", (did,))
+#|
+#|
+#| def crear_sesiones_desde_secuencia(uid, asig, udoc):
+#|     """Crea una sesión vacía por cada fila de la secuencia de la unidad. Devuelve cuántas creó."""
+#|     d = contenido(udoc)
+#|     creadas = 0
+#|     for i, fila in enumerate(d.get("secuencia", []), 1):
+#|         titulo = fila.get("titulo") or f"Sesión {i}"
+#|         if get_doc(asig["id"], "sesion", numero=i, padre_id=udoc["id"]):
+#|             continue
+#|         guardar_doc(uid, asig["id"], "sesion", i, f"Sesión {i}: {titulo}",
+#|                     {"numero": i, "titulo": titulo, "unidad_numero": udoc["numero"], "semana": fila.get("semana"),
+#|                      "competencias_sugeridas": [fila["competencia"]] if fila.get("competencia") else []},
+#|                     padre_id=udoc["id"])
+#|         creadas += 1
+#|     return creadas
+#@@ END
 #@@ MODULE curriculo
 #| """Base curricular verificada: competencias, capacidades, desempeños y transversales.
 #|
@@ -461,6 +715,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| """
 #| import streamlit as st
 #| from db import fetch, execute
+#| from repo import config_get
 #| from util import norm
 #|
 #| NIVELES = ["Inicial", "Primaria", "Secundaria"]
@@ -691,6 +946,32 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                  (competencia_id, grado))
 #|
 #|
+#| def estandar_de(competencia_id, ciclo):
+#|     f = fetch("SELECT texto FROM curriculo_estandares WHERE competencia_id=%s AND ciclo=%s ORDER BY id LIMIT 1",
+#|               (competencia_id, ciclo), one=True)
+#|     return f["texto"] if f else ""
+#|
+#|
+#| def detalle_competencia(competencia_id):
+#|     return fetch("SELECT fuente, verificado_en FROM curriculo_competencias WHERE id=%s", (competencia_id,), one=True) or {}
+#|
+#|
+#| def bloqueo_curricular(asig):
+#|     """Si el administrador activó «exigir currículo verificado», devuelve el motivo del bloqueo (o None)."""
+#|     if config_get("exigir_verificado", "0") != "1":
+#|         return None
+#|     comps = competencias_de(asig["nivel"], asig["area"])
+#|     if not comps:
+#|         return "Esta área no tiene competencias cargadas en la base curricular oficial."
+#|     sin_ver = [c["nombre"] for c in comps if not c["verificado"]]
+#|     sin_des = [c["nombre"] for c in comps if not desempenos_de(c["id"], asig["grado"])]
+#|     if sin_ver or sin_des:
+#|         return ("El administrador aún no verificó el currículo oficial de esta área para este grado "
+#|                 f"({len(sin_ver)} competencia(s) sin verificar, {len(sin_des)} sin desempeños). "
+#|                 "Cuando lo verifique podrás generar documentos.")
+#|     return None
+#|
+#|
 #| def estado_area(nivel, area, grado):
 #|     """(n competencias, n verificadas, n con desempeños para el grado)."""
 #|     comps = competencias_de(nivel, area)
@@ -745,212 +1026,6 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         if n and (n in norm(real) or norm(real) in n):
 #|             return real
 #|     return None
-#@@ END
-#@@ MODULE repo
-#| """Acceso a datos: usuarios, créditos, asignaciones (áreas del docente) y documentos."""
-#| import json
-#| from db import fetch, execute
-#|
-#| ORDEN_NIVEL = {"Inicial": 0, "Primaria": 1, "Secundaria": 2}
-#|
-#| COSTOS_DEFAULT = {"caracterizacion": 0, "anual": 2, "unidad": 2, "sesion": 1,
-#|                   "rubrica": 1, "ficha": 1, "examen": 1, "importar": 1, "revision": 1}
-#| NOMBRES_COSTO = {
-#|     "caracterizacion": "Boceto de caracterización del estudiante",
-#|     "anual": "Situaciones significativas (planificación anual)",
-#|     "unidad": "Unidad de aprendizaje",
-#|     "sesion": "Sesión de aprendizaje",
-#|     "rubrica": "Rúbrica de evaluación",
-#|     "ficha": "Ficha de trabajo",
-#|     "examen": "Examen",
-#|     "importar": "Importar unidad desde Word",
-#|     "revision": "Revisión de coherencia",
-#| }
-#|
-#|
-#| # ------------------------------------------------------------------
-#| # Configuración y créditos
-#| # ------------------------------------------------------------------
-#| def config_get(clave, defecto=None):
-#|     f = fetch("SELECT valor FROM config WHERE clave=%s", (clave,), one=True)
-#|     return f["valor"] if f else defecto
-#|
-#|
-#| def config_set(clave, valor):
-#|     if fetch("SELECT clave FROM config WHERE clave=%s", (clave,), one=True):
-#|         execute("UPDATE config SET valor=%s WHERE clave=%s", (str(valor), clave))
-#|     else:
-#|         execute("INSERT INTO config (clave, valor) VALUES (%s, %s)", (clave, str(valor)))
-#|
-#|
-#| def costo_de(accion):
-#|     v = config_get(f"costo_{accion}")
-#|     try:
-#|         return int(v) if v is not None else COSTOS_DEFAULT.get(accion, 1)
-#|     except ValueError:
-#|         return COSTOS_DEFAULT.get(accion, 1)
-#|
-#|
-#| def get_usuario(uid):
-#|     return fetch("SELECT id, nombre, correo, rol, creditos, activo, colegio, colegio_id, nivel_educativo "
-#|                  "FROM usuarios WHERE id=%s", (uid,), one=True)
-#|
-#|
-#| def cobrar(uid, accion, veces=1):
-#|     """Descuenta créditos (el administrador no paga). Se llama DESPUÉS de que la IA respondió bien."""
-#|     u = get_usuario(uid)
-#|     if not u or u["rol"] == "admin":
-#|         return
-#|     costo = costo_de(accion) * veces
-#|     if costo > 0:
-#|         execute("UPDATE usuarios SET creditos = creditos - %s WHERE id=%s AND creditos >= %s", (costo, uid, costo))
-#|
-#|
-#| def mapa_colegios(solo_activos=True):
-#|     sql = "SELECT id, nombre FROM colegios" + (" WHERE activo=1" if solo_activos else "") + " ORDER BY nombre"
-#|     mapa = {0: "— Docente independiente / sin colegio —"}
-#|     mapa.update({c["id"]: c["nombre"] for c in fetch(sql)})
-#|     return mapa
-#|
-#|
-#| # ------------------------------------------------------------------
-#| # Asignaciones (áreas del docente)
-#| # ------------------------------------------------------------------
-#| def listar_asignaciones(uid):
-#|     filas = fetch("SELECT * FROM asignaciones WHERE usuario_id=%s", (uid,))
-#|     return sorted(filas, key=lambda a: (ORDEN_NIVEL.get(a["nivel"], 9), a["grado"], a["area"], a["seccion"] or ""))
-#|
-#|
-#| def get_asignacion(aid):
-#|     return fetch("SELECT * FROM asignaciones WHERE id=%s", (aid,), one=True)
-#|
-#|
-#| def crear_asignacion(uid, d):
-#|     nuevo, _ = execute(
-#|         "INSERT INTO asignaciones (usuario_id, ciclo_escolar, institucion, director, docente, region, nivel, grado, area, seccion) "
-#|         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-#|         (uid, d["ciclo_escolar"], d["institucion"], d["director"], d["docente"], d["region"],
-#|          d["nivel"], d["grado"], d["area"], d["seccion"]))
-#|     return nuevo
-#|
-#|
-#| CAMPOS_ASIG = {"institucion", "director", "docente", "region", "seccion", "caracterizacion", "ciclo_escolar"}
-#|
-#|
-#| def actualizar_asignacion(aid, **campos):
-#|     campos = {k: v for k, v in campos.items() if k in CAMPOS_ASIG}
-#|     if not campos:
-#|         return
-#|     sets = ", ".join(f"{k}=%s" for k in campos)
-#|     execute(f"UPDATE asignaciones SET {sets} WHERE id=%s", tuple(campos.values()) + (aid,))
-#|
-#|
-#| def borrar_asignacion(aid):
-#|     execute("DELETE FROM documentos WHERE asignacion_id=%s", (aid,))
-#|     execute("DELETE FROM asignaciones WHERE id=%s", (aid,))
-#|
-#|
-#| def resumen_asignacion(aid):
-#|     filas = fetch("SELECT tipo, COUNT(*) AS n FROM documentos WHERE asignacion_id=%s GROUP BY tipo", (aid,))
-#|     return {f["tipo"]: f["n"] for f in filas}
-#|
-#|
-#| # ------------------------------------------------------------------
-#| # Documentos
-#| # ------------------------------------------------------------------
-#| def contenido(doc):
-#|     if not doc or not doc.get("contenido"):
-#|         return {}
-#|     try:
-#|         return json.loads(doc["contenido"])
-#|     except (TypeError, ValueError):
-#|         return {}
-#|
-#|
-#| def get_doc_by_id(did):
-#|     if not did:
-#|         return None
-#|     return fetch("SELECT * FROM documentos WHERE id=%s", (did,), one=True)
-#|
-#|
-#| def get_doc(aid, tipo, numero=None, padre_id=None):
-#|     sql = "SELECT * FROM documentos WHERE asignacion_id=%s AND tipo=%s"
-#|     params = [aid, tipo]
-#|     if numero is not None:
-#|         sql += " AND numero=%s"
-#|         params.append(numero)
-#|     if padre_id is not None:
-#|         sql += " AND padre_id=%s"
-#|         params.append(padre_id)
-#|     sql += " ORDER BY id DESC LIMIT 1"
-#|     return fetch(sql, tuple(params), one=True)
-#|
-#|
-#| def listar_docs(aid, tipo=None, padre_id=None):
-#|     sql = "SELECT * FROM documentos WHERE asignacion_id=%s"
-#|     params = [aid]
-#|     if tipo:
-#|         sql += " AND tipo=%s"
-#|         params.append(tipo)
-#|     if padre_id is not None:
-#|         sql += " AND padre_id=%s"
-#|         params.append(padre_id)
-#|     sql += " ORDER BY numero, id"
-#|     return fetch(sql, tuple(params))
-#|
-#|
-#| def guardar_doc(uid, aid, tipo, numero, titulo, data, padre_id=None, color=None, normativa=None):
-#|     """Crea o actualiza un documento. Devuelve su id."""
-#|     clave_num = numero if tipo in ("unidad", "sesion") else None
-#|     clave_pad = padre_id if tipo in ("sesion", "rubrica", "ficha", "examen") else None
-#|     existente = get_doc(aid, tipo, clave_num, clave_pad)
-#|     texto = json.dumps(data, ensure_ascii=False)
-#|     titulo = (titulo or "")[:255]
-#|     if existente:
-#|         sets, params = ["titulo=%s", "contenido=%s", "numero=%s"], [titulo, texto, numero]
-#|         if color:
-#|             sets.append("color=%s")
-#|             params.append(color)
-#|         if normativa:
-#|             sets.append("normativa_usada=%s")
-#|             params.append(normativa[:255])
-#|         if padre_id is not None:
-#|             sets.append("padre_id=%s")
-#|             params.append(padre_id)
-#|         execute(f"UPDATE documentos SET {', '.join(sets)} WHERE id=%s", tuple(params) + (existente["id"],))
-#|         return existente["id"]
-#|     nuevo, _ = execute(
-#|         "INSERT INTO documentos (usuario_id, asignacion_id, tipo, padre_id, numero, titulo, contenido, color, normativa_usada) "
-#|         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-#|         (uid, aid, tipo, padre_id, numero, titulo, texto, color or "1F3B8F", (normativa or "")[:255]))
-#|     return nuevo
-#|
-#|
-#| def cambiar_color(did, color):
-#|     execute("UPDATE documentos SET color=%s WHERE id=%s", (color, did))
-#|
-#|
-#| def borrar_doc(did):
-#|     """Borra un documento y todo lo que depende de él."""
-#|     for hijo in fetch("SELECT id FROM documentos WHERE padre_id=%s", (did,)):
-#|         borrar_doc(hijo["id"])
-#|     execute("DELETE FROM documentos WHERE id=%s", (did,))
-#|
-#|
-#| def crear_sesiones_desde_secuencia(uid, asig, udoc):
-#|     """Crea una sesión vacía por cada fila de la secuencia de la unidad. Devuelve cuántas creó."""
-#|     d = contenido(udoc)
-#|     creadas = 0
-#|     for i, fila in enumerate(d.get("secuencia", []), 1):
-#|         titulo = fila.get("titulo") or f"Sesión {i}"
-#|         if get_doc(asig["id"], "sesion", numero=i, padre_id=udoc["id"]):
-#|             continue
-#|         guardar_doc(uid, asig["id"], "sesion", i, f"Sesión {i}: {titulo}",
-#|                     {"numero": i, "titulo": titulo, "unidad_numero": udoc["numero"], "semana": fila.get("semana"),
-#|                      "competencias_sugeridas": [fila["competencia"]] if fila.get("competencia") else []},
-#|                     padre_id=udoc["id"])
-#|         creadas += 1
-#|     return creadas
 #@@ END
 #@@ MODULE render
 #| """Documentos oficiales: se arman como "bloques" y se dibujan igual en Word y en la vista previa."""
@@ -1125,6 +1200,11 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     b += [("salto",), ("sec", "CLAVES DE RESPUESTA (SOLO PARA EL DOCENTE)"),
 #|           ("tabla", ["N.°", "Respuesta correcta", "Puntaje"],
 #|            [[p.get("numero"), p.get("respuesta"), p.get("puntaje")] for p in d.get("preguntas", [])])]
+#|     if any(p.get("desempeno_texto") for p in d.get("preguntas", [])):
+#|         b += [("sec", "MATRIZ DE EVALUACIÓN (SOLO PARA EL DOCENTE)"),
+#|               ("tabla", ["N.°", "Competencia", "Desempeño evaluado", "Puntaje"],
+#|                [[p.get("numero"), p.get("competencia"), p.get("desempeno_texto"), p.get("puntaje")]
+#|                 for p in d.get("preguntas", [])])]
 #|     return b
 #|
 #|
@@ -1340,6 +1420,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     pdata = contenido(padre) if padre else {}
 #|     if tipo == "sesion":
 #|         return bloques_sesion(asig, pdata, d, trans), False, f"sesion_{doc.get('numero', 1)}_{base}.docx"
+#|     if tipo == "examen_unidad":
+#|         return bloques_examen(asig, pdata, d), False, f"examen_unidad_{doc.get('numero', 1)}_{base}.docx"
 #|     if tipo == "rubrica":
 #|         return bloques_rubrica(asig, pdata, d), True, f"rubrica_{base}.docx"
 #|     if tipo == "ficha":
@@ -1554,6 +1636,307 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                 f"(última {filas[0]['aprobado_en']:%d/%m/%Y})")
 #|     return ctx, etiqueta[:255]
 #@@ END
+#@@ MODULE programas
+#| """Programas Curriculares oficiales (PDF de gob.pe): buscar, leer, extraer desempeños y verificarlos.
+#|
+#| Reglas de oro:
+#| - La IA NO busca en internet ni inventa: el sistema descarga las páginas oficiales y la IA solo ordena texto.
+#| - Todo desempeño/estándar que la IA devuelva debe aparecer en el PDF (comparación tolerante a saltos de línea
+#|   y signos); si no aparece, se descarta.
+#| - Lo extraído entra como «pendiente» y solo el administrador lo aprueba.
+#| """
+#| import hashlib
+#| import io
+#| import re
+#| from urllib.parse import urljoin
+#|
+#| import requests
+#| from bs4 import BeautifulSoup
+#|
+#| from curriculo import GRADOS, areas_de, competencias_de
+#| from db import execute, execute_many, fetch
+#| from ia import pedir_json
+#| from util import norm, s
+#|
+#| UA = {"User-Agent": "Mozilla/5.0 (compatible; EduPeruIA-Programas/1.0)"}
+#| PORTALES = [
+#|     "https://www.gob.pe/es/90158-ministerio-de-educacion-programas-curriculares-de-la-educacion-basica-regular",
+#|     "https://www.gob.pe/institucion/minedu/campa%C3%B1as/106784-curriculo-nacional-de-la-educacion-basica",
+#| ]
+#| MAX_MB = 120
+#| CICLOS_VALIDOS = ["II", "III", "IV", "V", "VI", "VII"]
+#|
+#|
+#| def nivel_probable(texto):
+#|     t = norm(texto)
+#|     for n in ("inicial", "primaria", "secundaria"):
+#|         if n in t:
+#|             return n.capitalize()
+#|     return ""
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # 1) BUSCAR en las páginas oficiales
+#| # ------------------------------------------------------------------
+#| def _titulo_pagina(soup):
+#|     h = soup.find("h1") or soup.title
+#|     return h.get_text(" ", strip=True) if h else ""
+#|
+#|
+#| def _firma_remota(url):
+#|     try:
+#|         h = requests.head(url, headers=UA, timeout=20, allow_redirects=True)
+#|         return "|".join(h.headers.get(k, "") for k in ("ETag", "Last-Modified", "Content-Length"))[:300]
+#|     except Exception:
+#|         return ""
+#|
+#|
+#| def buscar_programas():
+#|     """Recorre las páginas oficiales y registra los PDF de Programas Curriculares.
+#|     Devuelve (lista de PDF registrados, lista de avisos/errores)."""
+#|     avisos, hallados, vistos = [], {}, set()
+#|     por_visitar = list(PORTALES)
+#|     for paso in range(2):
+#|         siguientes = []
+#|         for url in por_visitar:
+#|             if url in vistos:
+#|                 continue
+#|             vistos.add(url)
+#|             try:
+#|                 r = requests.get(url, headers=UA, timeout=40)
+#|                 r.raise_for_status()
+#|             except Exception as e:
+#|                 avisos.append(f"No se pudo abrir {url}: {e}")
+#|                 continue
+#|             soup = BeautifulSoup(r.text, "html.parser")
+#|             titulo_pag = _titulo_pagina(soup)
+#|             for a in soup.find_all("a", href=True):
+#|                 href = urljoin(url, a["href"]).split("#")[0]
+#|                 texto = a.get_text(" ", strip=True)
+#|                 if href.lower().split("?")[0].endswith(".pdf"):
+#|                     # Si el enlace dice solo «Descargar», se usa el título de la página; si dice otra cosa, se usa su texto
+#|                     generico = norm(texto) in ("", "descargar", "ver", "descargar pdf", "pdf", "descargar archivo")
+#|                     titulo = titulo_pag if generico else texto
+#|                     contexto = norm(f"{titulo} {href}")
+#|                     if "curricul" in contexto or "programa" in contexto:
+#|                         hallados.setdefault(href, {"url": href, "titulo": titulo[:300], "origen": url})
+#|                 elif paso == 0 and "gob.pe" in href and (
+#|                         "programa-curricular" in href.lower() or "programa curricular" in norm(texto)):
+#|                     siguientes.append(href)
+#|         por_visitar = siguientes[:20]
+#|     if not hallados:
+#|         avisos.append("No se encontraron PDF en las páginas oficiales (puede que gob.pe cargue su contenido con "
+#|                       "JavaScript o bloquee el acceso). Usa «Pegar URL» o «Subir PDF».")
+#|
+#|     nuevos = []
+#|     for url, h in hallados.items():
+#|         ex = fetch("SELECT id, firma, estado FROM curriculo_pdf WHERE url=%s", (url,), one=True)
+#|         if ex is None:
+#|             nid, _ = execute("INSERT INTO curriculo_pdf (url, titulo, nivel, origen, firma, estado) "
+#|                              "VALUES (%s,%s,%s,%s,%s,'nuevo')",
+#|                              (url, h["titulo"], nivel_probable(f"{h['titulo']} {url} {h['origen']}"), h["origen"],
+#|                               _firma_remota(url)))
+#|             nuevos.append(nid)
+#|         elif ex["estado"] == "leido":
+#|             firma = _firma_remota(url)
+#|             if firma and ex["firma"] and firma != ex["firma"]:
+#|                 execute("UPDATE curriculo_pdf SET estado='actualizado', firma=%s WHERE id=%s", (firma, ex["id"]))
+#|     _clasificar_con_ia(nuevos)
+#|     return fetch("SELECT * FROM curriculo_pdf ORDER BY id DESC"), avisos
+#|
+#|
+#| def _clasificar_con_ia(ids):
+#|     """La IA solo ayuda a decidir el nivel de los PDF cuyo título no lo dice (no navega por internet)."""
+#|     pend = [f for f in (fetch("SELECT id, titulo, url, nivel FROM curriculo_pdf WHERE id=%s", (i,), one=True) for i in ids)
+#|             if f and not f["nivel"]]
+#|     if not pend:
+#|         return
+#|     lista = "\n".join(f"{i}. título: {f['titulo']} | url: {f['url']}" for i, f in enumerate(pend))
+#|     try:
+#|         datos, _ = pedir_json(
+#|             "Clasifica estos documentos publicados por el MINEDU (Perú). Para cada uno indica a qué nivel de la "
+#|             "Educación Básica Regular corresponde (Inicial, Primaria, Secundaria) o 'Otro', y si es un Programa "
+#|             f"Curricular oficial (true/false).\n{lista}\n"
+#|             'Formato: {"clasificacion":[{"i":0,"nivel":"Primaria","es_programa":true}]}')
+#|         for x in datos.get("clasificacion", []):
+#|             f = pend[int(x["i"])]
+#|             nivel = x.get("nivel") if x.get("nivel") in ("Inicial", "Primaria", "Secundaria") else ""
+#|             estado = "nuevo" if x.get("es_programa", True) else "descartado"
+#|             execute("UPDATE curriculo_pdf SET nivel=%s, estado=%s WHERE id=%s", (nivel, estado, f["id"]))
+#|     except Exception:
+#|         pass  # el administrador puede elegir el nivel a mano
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # 2) DESCARGAR y LEER el PDF (se guarda el texto por página)
+#| # ------------------------------------------------------------------
+#| def registrar_url(url, titulo="", nivel=""):
+#|     ex = fetch("SELECT id FROM curriculo_pdf WHERE url=%s", (url,), one=True)
+#|     if ex:
+#|         return ex["id"]
+#|     nid, _ = execute("INSERT INTO curriculo_pdf (url, titulo, nivel, origen, estado) VALUES (%s,%s,%s,%s,'nuevo')",
+#|                      (url, titulo or url[-80:], nivel or nivel_probable(f"{titulo} {url}"), "manual"))
+#|     return nid
+#|
+#|
+#| def _guardar_paginas(pdf_id, datos: bytes, firma=""):
+#|     from pypdf import PdfReader
+#|     lector = PdfReader(io.BytesIO(datos))
+#|     execute("DELETE FROM curriculo_pdf_paginas WHERE pdf_id=%s", (pdf_id,))
+#|     filas = []
+#|     for n, pagina in enumerate(lector.pages, 1):
+#|         try:
+#|             texto = pagina.extract_text() or ""
+#|         except Exception:
+#|             texto = ""
+#|         filas.append((pdf_id, n, texto))
+#|         if len(filas) >= 40:
+#|             execute_many("INSERT INTO curriculo_pdf_paginas (pdf_id, pagina, texto) VALUES (%s,%s,%s)", filas)
+#|             filas = []
+#|     execute_many("INSERT INTO curriculo_pdf_paginas (pdf_id, pagina, texto) VALUES (%s,%s,%s)", filas)
+#|     execute("UPDATE curriculo_pdf SET paginas=%s, hash_contenido=%s, firma=%s, estado='leido', leido_en=NOW() WHERE id=%s",
+#|             (len(lector.pages), hashlib.sha256(datos).hexdigest(), firma or "", pdf_id))
+#|     return len(lector.pages)
+#|
+#|
+#| def descargar_y_leer(pdf_id):
+#|     f = fetch("SELECT url FROM curriculo_pdf WHERE id=%s", (pdf_id,), one=True)
+#|     r = requests.get(f["url"], headers=UA, timeout=180, stream=True)
+#|     r.raise_for_status()
+#|     datos = b""
+#|     for trozo in r.iter_content(1024 * 512):
+#|         datos += trozo
+#|         if len(datos) > MAX_MB * 1024 * 1024:
+#|             raise RuntimeError(f"El PDF pesa más de {MAX_MB} MB.")
+#|     if not datos.startswith(b"%PDF"):
+#|         raise RuntimeError("El enlace no devolvió un PDF (puede requerir abrirse desde el navegador).")
+#|     firma = "|".join(r.headers.get(k, "") for k in ("ETag", "Last-Modified", "Content-Length"))[:300]
+#|     return _guardar_paginas(pdf_id, datos, firma)
+#|
+#|
+#| def leer_subido(nombre, datos: bytes, nivel=""):
+#|     if not datos.startswith(b"%PDF"):
+#|         raise RuntimeError("El archivo no es un PDF.")
+#|     pdf_id = registrar_url(f"subido:{nombre}", nombre, nivel)
+#|     return pdf_id, _guardar_paginas(pdf_id, datos)
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # 3) EXTRAER con IA y VERIFICAR contra el texto del PDF
+#| # ------------------------------------------------------------------
+#| def mapear_grado(valor, nivel):
+#|     m = re.search(r"\d", str(valor or ""))
+#|     if not m:
+#|         return None
+#|     n = m.group(0)
+#|     for g in GRADOS[nivel]:
+#|         if g.startswith(n):
+#|             return g
+#|     return None
+#|
+#|
+#| def mapear_ciclo(valor):
+#|     v = str(valor or "").upper().replace("CICLO", "").strip()
+#|     return v if v in CICLOS_VALIDOS else None
+#|
+#|
+#| def _pagina_de(texto_norm, paginas):
+#|     for numero, _, pn in paginas:
+#|         if texto_norm in pn:
+#|             return numero
+#|     return 0
+#|
+#|
+#| def extraer(pdf_id, nivel, areas=None, progreso=None):
+#|     """Extrae desempeños y estándares del PDF ya leído. Devuelve un resumen con contadores."""
+#|     filas = fetch("SELECT pagina, texto FROM curriculo_pdf_paginas WHERE pdf_id=%s ORDER BY pagina", (pdf_id,))
+#|     if not filas:
+#|         raise RuntimeError("Primero hay que descargar y leer el PDF.")
+#|     paginas = [(f["pagina"], f["texto"], norm(f["texto"])) for f in filas]
+#|     resumen = {"verificados": 0, "descartados": 0, "sin_paginas": []}
+#|     trabajos = [(a, c) for a in (areas or areas_de(nivel)) for c in competencias_de(nivel, a)]
+#|     for k, (area, c) in enumerate(trabajos, 1):
+#|         if progreso:
+#|             progreso(k / len(trabajos), f"{area} · {c['nombre'][:60]}")
+#|         clave = norm(c["nombre"])[:70]
+#|         cand = [p for p in paginas if clave in p[2] and ("desempe" in p[2] or "estandar" in p[2])][:8]
+#|         if not cand:
+#|             resumen["sin_paginas"].append(f"{area}: {c['nombre']}")
+#|             continue
+#|         plano = " ".join(p[2] for p in cand)
+#|         texto = "\n".join(f"[Página {p[0]}]\n{p[1]}" for p in cand)[:24000]
+#|         try:
+#|             datos, _ = pedir_json(f"""Del siguiente texto del Programa Curricular oficial del MINEDU (Perú), nivel {nivel}, extrae para la competencia «{c['nombre']}»:
+#| - "desempenos": los desempeños de cada grado ({', '.join(GRADOS[nivel])}). Cada uno con "grado" y "texto".
+#| - "estandares": el estándar de aprendizaje de cada ciclo. Cada uno con "ciclo" (II, III, IV, V, VI o VII) y "texto".
+#| COPIA cada texto EXACTAMENTE como aparece en el documento, sin cambiar, resumir ni agregar palabras. Si no encuentras algo, no lo incluyas. No inventes.
+#| Formato: {{"desempenos":[{{"grado":"3.° grado","texto":"..."}}],"estandares":[{{"ciclo":"IV","texto":"..."}}]}}
+#|
+#| TEXTO:
+#| {texto}""")
+#|         except Exception:
+#|             resumen["sin_paginas"].append(f"{area}: {c['nombre']} (la IA no respondió)")
+#|             continue
+#|         execute("DELETE FROM curriculo_importado WHERE pdf_id=%s AND competencia_id=%s AND estado='pendiente'",
+#|                 (pdf_id, c["id"]))
+#|         nuevos = []
+#|         for tipo, lista, mapear in (("desempeno", datos.get("desempenos") or [], lambda x: mapear_grado(x.get("grado"), nivel)),
+#|                                     ("estandar", datos.get("estandares") or [], lambda x: mapear_ciclo(x.get("ciclo")))):
+#|             for x in lista:
+#|                 if not isinstance(x, dict):
+#|                     continue
+#|                 clave_g, t = mapear(x), s(x.get("texto"))
+#|                 tn = norm(t)
+#|                 if clave_g and len(tn) > 25 and tn in plano:
+#|                     nuevos.append((pdf_id, c["id"], tipo, clave_g, t, _pagina_de(tn, cand)))
+#|                     resumen["verificados"] += 1
+#|                 else:
+#|                     resumen["descartados"] += 1
+#|         execute_many("INSERT INTO curriculo_importado (pdf_id, competencia_id, tipo, grado, texto, pagina) "
+#|                      "VALUES (%s,%s,%s,%s,%s,%s)", nuevos)
+#|     return resumen
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # 4) REVISIÓN: aprobar / rechazar
+#| # ------------------------------------------------------------------
+#| def pendientes(pdf_id):
+#|     return fetch("SELECT i.id, i.competencia_id, c.area, c.nombre AS competencia, i.tipo, i.grado, i.texto, i.pagina "
+#|                  "FROM curriculo_importado i JOIN curriculo_competencias c ON c.id = i.competencia_id "
+#|                  "WHERE i.pdf_id=%s AND i.estado='pendiente' ORDER BY c.area, c.id, i.tipo, i.grado, i.id", (pdf_id,))
+#|
+#|
+#| def aprobar(ids, marcar_verificada=True, fuente=""):
+#|     """Pasa lo aprobado a la base curricular (reemplaza lo anterior de esa competencia y grado/ciclo)."""
+#|     if not ids:
+#|         return 0
+#|     marcas = ",".join(["%s"] * len(ids))
+#|     filas = fetch(f"SELECT * FROM curriculo_importado WHERE id IN ({marcas}) ORDER BY id", tuple(ids))
+#|     grupos = {}
+#|     for f in filas:
+#|         grupos.setdefault((f["competencia_id"], f["tipo"], f["grado"]), []).append(f)
+#|     for (cid, tipo, clave), items in grupos.items():
+#|         if tipo == "desempeno":
+#|             execute("DELETE FROM curriculo_desempenos WHERE competencia_id=%s AND grado=%s", (cid, clave))
+#|             execute_many("INSERT INTO curriculo_desempenos (competencia_id, grado, texto, orden) VALUES (%s,%s,%s,%s)",
+#|                          [(cid, clave, x["texto"], i) for i, x in enumerate(items, 1)])
+#|         else:
+#|             execute("DELETE FROM curriculo_estandares WHERE competencia_id=%s AND ciclo=%s", (cid, clave))
+#|             execute("INSERT INTO curriculo_estandares (competencia_id, ciclo, texto) VALUES (%s,%s,%s)",
+#|                     (cid, clave, items[0]["texto"]))
+#|     if marcar_verificada:
+#|         for cid in {f["competencia_id"] for f in filas}:
+#|             execute("UPDATE curriculo_competencias SET verificado=1, verificado_en=NOW(), fuente=%s WHERE id=%s",
+#|                     (fuente[:600], cid))
+#|     execute(f"UPDATE curriculo_importado SET estado='aprobado' WHERE id IN ({marcas})", tuple(ids))
+#|     return len(filas)
+#|
+#|
+#| def rechazar(ids):
+#|     if ids:
+#|         marcas = ",".join(["%s"] * len(ids))
+#|         execute(f"UPDATE curriculo_importado SET estado='rechazado' WHERE id IN ({marcas})", tuple(ids))
+#@@ END
 #@@ MODULE auth
 #| """Inicio de sesión, registro y contraseñas."""
 #| import hashlib
@@ -1653,6 +2036,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| import streamlit as st
 #| import streamlit.components.v1 as components
 #|
+#| from curriculo import bloqueo_curricular
 #| from repo import cambiar_color, costo_de, get_asignacion, get_doc_by_id, get_usuario, resumen_asignacion
 #| from render import COLORES, COLOR_DEFECTO, ICONO_COLOR, a_docx, a_html
 #| from exportar import bloques_de
@@ -1662,6 +2046,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| PAG_UNIDADES = "📚 Unidades"
 #| PAG_SESIONES = "📝 Sesiones"
 #| PAG_BIBLIO = "🗂️ Mi Biblioteca"
+#| PAG_CURRICULO = "📖 Currículo oficial"
 #| PAG_ADMIN = "⚙️ Administración"
 #|
 #| MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -1758,8 +2143,15 @@ elif pagina == PAG_ADMIN and es_admin:
 #| # ------------------------------------------------------------------
 #| # Costo en créditos con confirmación
 #| # ------------------------------------------------------------------
-#| def confirmar(accion, etiqueta, clave, veces=1):
-#|     """Botón que pide confirmar el costo en créditos. Devuelve True cuando el usuario confirma."""
+#| def confirmar(accion, etiqueta, clave, veces=1, asig=None):
+#|     """Botón que pide confirmar el costo en créditos. Devuelve True cuando el usuario confirma.
+#|     Si se pasa 'asig' y el administrador exige currículo verificado, bloquea las áreas sin verificar."""
+#|     if asig is not None:
+#|         motivo = bloqueo_curricular(asig)
+#|         if motivo:
+#|             st.error("🔒 " + motivo)
+#|             st.button("Ver el currículo oficial", key=f"cv_{clave}", on_click=ir_a, args=(PAG_CURRICULO,))
+#|             return False
 #|     u = get_usuario(st.session_state.user_id)
 #|     costo = 0 if u["rol"] == "admin" else costo_de(accion) * veces
 #|     if costo == 0:
@@ -1808,6 +2200,325 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         components.html(a_html(bloques, color, doc.get("normativa_usada")), height=620, scrolling=True)
 #|     st.download_button("⬇️ Descargar en Word", data=a_docx(bloques, color, doc.get("normativa_usada"), horizontal),
 #|                        file_name=archivo, mime=MIME_DOCX, key=f"dl_{clave}_{doc_id}", type="primary")
+#@@ END
+#@@ MODULE examen_unidad
+#| """Examen de unidad o bimestral: se arma con los desempeños (de la base oficial) y los temas de las unidades."""
+#| import pandas as pd
+#| import streamlit as st
+#|
+#| from ia import pedir_json, preambulo
+#| from normativa import normativa_vigente
+#| from repo import cobrar, contenido, get_doc, guardar_doc, listar_docs
+#| from ui import campo_linea, campo_texto, confirmar, siguiente_version, vista_previa_y_descarga
+#| from util import a_lista, entero, norm, s
+#|
+#|
+#| def _contexto(unidades):
+#|     """Texto para la IA + lista numerada de desempeños verificados {n, competencia, texto}."""
+#|     des, lineas = [], []
+#|     for ud in unidades:
+#|         d = contenido(ud)
+#|         temas = "; ".join(f.get("titulo", "") for f in d.get("secuencia", []))
+#|         lineas.append(f"UNIDAD {d.get('numero')}: {d.get('titulo')}\n  Situación: {d.get('situacion', '')}\n  Temas de las sesiones: {temas}")
+#|         for p in d.get("propositos", []):
+#|             lineas.append(f"  Competencia: {p['competencia']} | Campo temático: {p.get('campo_tematico', '')}")
+#|             for texto in p.get("desempenos", []):
+#|                 des.append({"n": len(des) + 1, "competencia": p["competencia"], "texto": texto})
+#|                 lineas.append(f"    D{len(des)}: {texto}")
+#|     return "\n".join(lineas), des
+#|
+#|
+#| def generar(asig, unidades, n_preg, tipos, total):
+#|     ctx, des = _contexto(unidades)
+#|     if not des:
+#|         raise RuntimeError("Las unidades elegidas no tienen desempeños. Completa los propósitos de aprendizaje primero.")
+#|     nums = ", ".join(str(ud["numero"]) for ud in unidades)
+#|     prompt = f"""{preambulo()}
+#| Elabora un EXAMEN {'de la unidad' if len(unidades) == 1 else 'bimestral'} para estudiantes de {asig['grado']} ({asig['nivel']}), área {asig['area']}.
+#| Unidades incluidas: {nums}. Número de preguntas: {n_preg}. Tipo: {tipos}. Puntaje total: {total} (los puntajes deben sumar exactamente {total}).
+#|
+#| Contenido de las unidades (los desempeños D1, D2... son oficiales; NO los reescribas):
+#| {ctx}
+#|
+#| Reglas:
+#| - Cada pregunta evalúa UN desempeño: indica su número en "desempeno" (ej. 3) y el nombre exacto de su competencia en "competencia".
+#| - Reparte las preguntas entre los desempeños y los temas de las unidades.
+#| - "opcion_multiple": 4 opciones "a) ...", "b) ...", y "respuesta" con la letra. "desarrollo": "opciones" vacía y "respuesta" con la respuesta esperada.
+#| - Lenguaje adecuado a la edad y contexto cercano a la región {asig['region']}.
+#| Formato: {{"titulo":"...","instrucciones":"...","preguntas":[{{"numero":1,"tipo":"opcion_multiple","enunciado":"...","opciones":["a) ...","b) ...","c) ...","d) ..."],"respuesta":"b","puntaje":2,"competencia":"...","desempeno":3}}]}}"""
+#|     ia, _ = pedir_json(prompt)
+#|     if not isinstance(ia, dict):
+#|         raise RuntimeError("La IA devolvió un formato inesperado. Intenta de nuevo.")
+#|     por_n = {x["n"]: x for x in des}
+#|     preguntas = []
+#|     for i, p in enumerate(ia.get("preguntas") or [], 1):
+#|         if not isinstance(p, dict):
+#|             continue
+#|         x = por_n.get(entero(p.get("desempeno"), 0))
+#|         preguntas.append({"numero": i, "tipo": s(p.get("tipo")) or "desarrollo", "enunciado": s(p.get("enunciado")),
+#|                           "opciones": a_lista(p.get("opciones")), "respuesta": s(p.get("respuesta")),
+#|                           "puntaje": s(p.get("puntaje")) or "1",
+#|                           "competencia": x["competencia"] if x else s(p.get("competencia")),
+#|                           "desempeno_texto": x["texto"] if x else ""})
+#|     if not preguntas:
+#|         raise RuntimeError("La IA no devolvió preguntas. Intenta de nuevo.")
+#|     titulo = s(ia.get("titulo")) or (f"Examen de la Unidad {nums}" if len(unidades) == 1 else f"Examen bimestral (Unidades {nums})")
+#|     return {"titulo": titulo, "instrucciones": s(ia.get("instrucciones")), "unidades": [ud["numero"] for ud in unidades],
+#|             "preguntas": preguntas}
+#|
+#|
+#| def render(asig, udoc):
+#|     uid, aid = st.session_state.user_id, asig["id"]
+#|     st.markdown("### 📋 Examen de la unidad / bimestre")
+#|     st.caption("Se arma con los temas y los desempeños oficiales de las unidades que elijas. Incluye una matriz que "
+#|                "muestra qué desempeño evalúa cada pregunta.")
+#|     todas = listar_docs(aid, "unidad")
+#|     numeros = [u["numero"] for u in todas]
+#|     doc = get_doc(aid, "examen_unidad", numero=udoc["numero"])
+#|     d = contenido(doc) if doc else {}
+#|     ver_key = f"ver_exu_{udoc['id']}"
+#|     ver = st.session_state.get(ver_key, 0)
+#|
+#|     sel = st.multiselect("Unidades que incluye (para un examen bimestral elige varias)", numeros,
+#|                          default=[x for x in d.get("unidades", [udoc["numero"]]) if x in numeros] or [udoc["numero"]],
+#|                          key=f"exu_sel_{udoc['id']}_{ver}", format_func=lambda n: f"Unidad {n}")
+#|     c1, c2, c3 = st.columns(3)
+#|     n_preg = c1.number_input("Número de preguntas", 5, 40, 12, key=f"exu_n_{udoc['id']}")
+#|     tipos = c2.selectbox("Tipo de preguntas", ["Mixto", "Solo opción múltiple", "Solo desarrollo"], key=f"exu_t_{udoc['id']}")
+#|     total = c3.number_input("Puntaje total", 5, 100, 20, key=f"exu_p_{udoc['id']}")
+#|
+#|     etiqueta = "✨ Generar examen" if not doc else "🔄 Volver a generar el examen"
+#|     if confirmar("examen_unidad", etiqueta, f"exu_{udoc['id']}", asig=asig):
+#|         try:
+#|             elegidas = [u for u in todas if u["numero"] in sel] or [udoc]
+#|             with st.spinner("Armando el examen con los desempeños de las unidades..."):
+#|                 nuevo = generar(asig, elegidas, int(n_preg), tipos, int(total))
+#|             guardar_doc(uid, aid, "examen_unidad", udoc["numero"], nuevo["titulo"], nuevo, padre_id=udoc["id"],
+#|                         normativa=normativa_vigente()[1])
+#|             cobrar(uid, "examen_unidad")
+#|             siguiente_version(ver_key)
+#|             st.rerun()
+#|         except Exception as e:
+#|             st.error(f"No se pudo generar: {e}")
+#|     if not doc:
+#|         return
+#|
+#|     base = f"exu_{udoc['id']}_{ver}"
+#|     campo_linea("Título del examen", f"{base}_t", d.get("titulo", ""))
+#|     campo_texto("Indicaciones", f"{base}_i", d.get("instrucciones", ""), 80)
+#|     filas = [{"numero": p.get("numero"), "tipo": p.get("tipo"), "enunciado": p.get("enunciado"),
+#|               "opciones": " | ".join(p.get("opciones") or []), "respuesta": p.get("respuesta"), "puntaje": p.get("puntaje"),
+#|               "competencia": p.get("competencia"), "desempeño evaluado": p.get("desempeno_texto")}
+#|              for p in d.get("preguntas", [])]
+#|     cols = ["numero", "tipo", "enunciado", "opciones", "respuesta", "puntaje", "competencia", "desempeño evaluado"]
+#|     ed = st.data_editor(pd.DataFrame(filas, columns=cols), key=f"{base}_ed", num_rows="dynamic", hide_index=True).fillna("")
+#|     if st.button("💾 Guardar examen", type="primary", key=f"exu_save_{udoc['id']}"):
+#|         pregs = []
+#|         for k, (_, r) in enumerate(ed.iterrows(), 1):
+#|             if s(r["enunciado"]):
+#|                 pregs.append({"numero": k, "tipo": s(r["tipo"]) or "desarrollo", "enunciado": s(r["enunciado"]),
+#|                               "opciones": [x.strip() for x in s(r["opciones"]).split("|") if x.strip()],
+#|                               "respuesta": s(r["respuesta"]), "puntaje": s(r["puntaje"]) or "1",
+#|                               "competencia": s(r["competencia"]), "desempeno_texto": s(r["desempeño evaluado"])})
+#|         guardar_doc(uid, aid, "examen_unidad", udoc["numero"], st.session_state.get(f"{base}_t", ""),
+#|                     {**d, "titulo": st.session_state.get(f"{base}_t", ""),
+#|                      "instrucciones": st.session_state.get(f"{base}_i", ""), "preguntas": pregs}, padre_id=udoc["id"])
+#|         st.success("Examen guardado ✅")
+#|     st.divider()
+#|     vista_previa_y_descarga(doc["id"], f"exu_{udoc['id']}", abierta=False)
+#@@ END
+#@@ MODULE v_curriculo
+#| """Currículo oficial: los lineamientos del MINEDU por curso (solo lectura; la IA no toca este contenido)."""
+#| import streamlit as st
+#|
+#| from curriculo import (GRADOS, NIVELES, areas_de, ciclo_de, competencias_de, desempenos_de, detalle_competencia,
+#|                        estandar_de)
+#| from db import fetch
+#| from ui import area_activa
+#|
+#|
+#| def render():
+#|     st.title("📖 Currículo oficial")
+#|     st.info("💡 Aquí ves los lineamientos oficiales del MINEDU por curso. Son los textos que usa el sistema: "
+#|             "la IA **no** los escribe ni los modifica; solo prepara actividades y materiales a partir de ellos.")
+#|
+#|     act = area_activa()
+#|     c1, c2, c3 = st.columns(3)
+#|     niveles = NIVELES
+#|     nivel = c1.selectbox("Nivel", niveles, index=niveles.index(act["nivel"]) if act else 1, key="cur_ver_nivel")
+#|     areas = areas_de(nivel)
+#|     if not areas:
+#|         st.warning("Este nivel todavía no tiene áreas cargadas.")
+#|         return
+#|     area = c2.selectbox("Área", areas, index=areas.index(act["area"]) if act and act["nivel"] == nivel
+#|                         and act["area"] in areas else 0, key="cur_ver_area")
+#|     grados = GRADOS[nivel]
+#|     grado = c3.selectbox("Grado", grados, index=grados.index(act["grado"]) if act and act["nivel"] == nivel
+#|                          and act["grado"] in grados else 0, key="cur_ver_grado")
+#|     ciclo = ciclo_de(nivel, grado)
+#|
+#|     comps = competencias_de(nivel, area)
+#|     if not comps:
+#|         st.warning("Esta área todavía no tiene competencias cargadas.")
+#|         return
+#|     verificadas = sum(1 for c in comps if c["verificado"])
+#|     con_des = sum(1 for c in comps if desempenos_de(c["id"], grado))
+#|     if verificadas == len(comps) and con_des == len(comps):
+#|         st.success(f"✅ Currículo verificado para {area} · {grado} (ciclo {ciclo}).")
+#|     else:
+#|         st.warning(f"⚠️ Pendiente de verificación: {verificadas} de {len(comps)} competencias verificadas; "
+#|                    f"{con_des} de {len(comps)} con desempeños cargados para {grado}.")
+#|
+#|     for c in comps:
+#|         det = detalle_competencia(c["id"])
+#|         with st.expander(("✅ " if c["verificado"] else "⚠️ ") + c["nombre"]):
+#|             st.markdown("**Capacidades**")
+#|             st.markdown("\n".join(f"- {x}" for x in c["capacidades"]) or "_Sin capacidades cargadas._")
+#|             est = estandar_de(c["id"], ciclo)
+#|             st.markdown(f"**Estándar de aprendizaje (ciclo {ciclo})**")
+#|             st.write(est or "_Aún no cargado._")
+#|             des = desempenos_de(c["id"], grado)
+#|             st.markdown(f"**Desempeños de {grado}**")
+#|             if des:
+#|                 st.markdown("\n".join(f"{i}. {d['texto']}" for i, d in enumerate(des, 1)))
+#|             else:
+#|                 st.caption("Aún no cargados por el administrador.")
+#|             if det.get("fuente"):
+#|                 fecha = f" · verificado el {det['verificado_en']:%d/%m/%Y}" if det.get("verificado_en") else ""
+#|                 st.caption(f"Fuente: {det['fuente']}{fecha}")
+#|
+#|     with st.expander("📜 Normativa vigente aprobada (MINEDU)"):
+#|         st.caption("Base: RM N.° 501-2025-MINEDU. Estas son las actualizaciones que el administrador revisó y aprobó.")
+#|         filas = fetch("SELECT f.nombre, f.url, v.resumen_cambios, v.aprobado_en FROM normativa_versiones v "
+#|                       "JOIN normativa_fuentes f ON f.id = v.fuente_id WHERE v.estado='aprobada' "
+#|                       "ORDER BY v.aprobado_en DESC LIMIT 10")
+#|         if not filas:
+#|             st.write("Todavía no hay actualizaciones aprobadas; se aplica la RM N.° 501-2025-MINEDU.")
+#|         for f in filas:
+#|             st.markdown(f"**{f['nombre']}** · aprobada el {f['aprobado_en']:%d/%m/%Y}")
+#|             st.caption(f["url"])
+#|             st.write(f["resumen_cambios"])
+#@@ END
+#@@ MODULE v_programas
+#| """Administración: buscar, leer y cargar los Programas Curriculares oficiales (PDF) con verificación."""
+#| import pandas as pd
+#| import streamlit as st
+#|
+#| from curriculo import NIVELES, areas_de
+#| from db import execute, fetch
+#| from programas import (aprobar, buscar_programas, descargar_y_leer, extraer, leer_subido, pendientes, registrar_url,
+#|                        rechazar)
+#|
+#| ESTADOS = {"nuevo": "🆕 Nuevo", "leido": "📖 Leído", "actualizado": "🔄 Actualizado en gob.pe", "descartado": "🚫 Descartado"}
+#|
+#|
+#| def render():
+#|     st.caption("El sistema revisa las páginas oficiales del MINEDU en gob.pe y trae los PDF de los Programas Curriculares. "
+#|                "La IA **no navega por internet**: solo ayuda a clasificar y a ordenar el texto, y todo lo que extrae "
+#|                "se comprueba contra el PDF. Nada pasa a los docentes sin tu aprobación.")
+#|
+#|     # ---------------- 1. Buscar
+#|     st.markdown("### ① Buscar en el MINEDU")
+#|     if st.button("🔎 Buscar Programas Curriculares en gob.pe", type="primary", key="prog_buscar"):
+#|         with st.spinner("Revisando las páginas oficiales..."):
+#|             try:
+#|                 lista, avisos = buscar_programas()
+#|                 for a in avisos:
+#|                     st.warning(a)
+#|                 st.success(f"Listo. Hay {len(lista)} documento(s) registrados.")
+#|             except Exception as e:
+#|                 st.error(f"No se pudo buscar: {e}")
+#|     with st.expander("Otras formas de traer un PDF (pegar enlace o subir archivo)"):
+#|         c1, c2 = st.columns(2)
+#|         url = c1.text_input("Enlace directo al PDF", key="prog_url", placeholder="https://cdn.www.gob.pe/uploads/...pdf")
+#|         nivel_url = c1.selectbox("Nivel del documento", [""] + NIVELES, key="prog_url_nivel")
+#|         if c1.button("➕ Agregar enlace", key="prog_url_btn") and url.startswith("http"):
+#|             registrar_url(url.strip(), nivel=nivel_url)
+#|             st.rerun()
+#|         archivo = c2.file_uploader("…o sube el PDF", type=["pdf"], key="prog_subir")
+#|         nivel_sub = c2.selectbox("Nivel del documento", [""] + NIVELES, key="prog_sub_nivel")
+#|         if archivo is not None and c2.button("📥 Leer este PDF", key="prog_sub_btn"):
+#|             try:
+#|                 with st.spinner("Leyendo el PDF (puede tardar)..."):
+#|                     _, n = leer_subido(archivo.name, archivo.getvalue(), nivel_sub)
+#|                 st.success(f"PDF leído: {n} páginas.")
+#|                 st.rerun()
+#|             except Exception as e:
+#|                 st.error(f"No se pudo leer: {e}")
+#|
+#|     docs = fetch("SELECT * FROM curriculo_pdf WHERE estado<>'descartado' ORDER BY id DESC")
+#|     if not docs:
+#|         st.info("Aún no hay documentos. Pulsa «Buscar» o agrega un enlace.")
+#|         return
+#|     st.dataframe(pd.DataFrame([{"id": d["id"], "estado": ESTADOS.get(d["estado"], d["estado"]), "nivel": d["nivel"],
+#|                                 "título": d["titulo"], "páginas": d["paginas"], "leído": d["leido_en"]} for d in docs]),
+#|                  hide_index=True)
+#|
+#|     # ---------------- 2. Leer
+#|     st.markdown("### ② Descargar y leer el PDF")
+#|     ids = [d["id"] for d in docs]
+#|     pid = st.selectbox("Documento", ids, key="prog_sel", format_func=lambda i: next(
+#|         f"{d['id']} · {d['nivel'] or '¿nivel?'} · {(d['titulo'] or d['url'])[:70]}" for d in docs if d["id"] == i))
+#|     doc = next(d for d in docs if d["id"] == pid)
+#|     if doc["estado"] == "actualizado":
+#|         st.warning("Este PDF cambió en gob.pe desde la última lectura. Vuelve a leerlo y a extraer.")
+#|     if not doc["url"].startswith("subido:"):
+#|         if st.button("⬇️ Descargar y leer", key=f"prog_leer_{pid}"):
+#|             try:
+#|                 with st.spinner("Descargando y leyendo el PDF..."):
+#|                     n = descargar_y_leer(pid)
+#|                 st.success(f"Leído: {n} páginas.")
+#|                 st.rerun()
+#|             except Exception as e:
+#|                 st.error(f"No se pudo leer: {e}")
+#|     if doc["estado"] not in ("leido", "actualizado") or not doc["paginas"]:
+#|         st.caption("Cuando el PDF esté leído podrás extraer los desempeños.")
+#|         return
+#|
+#|     # ---------------- 3. Extraer
+#|     st.markdown("### ③ Extraer desempeños y estándares (IA + verificación contra el PDF)")
+#|     nivel = st.selectbox("Nivel a extraer", NIVELES, key="prog_nivel",
+#|                          index=NIVELES.index(doc["nivel"]) if doc["nivel"] in NIVELES else 1)
+#|     areas = areas_de(nivel)
+#|     sel = st.multiselect("Áreas (vacío = todas)", areas, key=f"prog_areas_{nivel}")
+#|     if st.button("🤖 Extraer y verificar", type="primary", key=f"prog_ext_{pid}"):
+#|         barra = st.progress(0.0)
+#|         try:
+#|             res = extraer(pid, nivel, sel or None, lambda f, t: barra.progress(min(f, 1.0), text=t))
+#|             st.success(f"Verificados contra el PDF: {res['verificados']} · descartados por no aparecer en el PDF: "
+#|                        f"{res['descartados']}")
+#|             if res["sin_paginas"]:
+#|                 with st.expander(f"No se encontraron páginas para {len(res['sin_paginas'])} competencia(s)"):
+#|                     st.write("\n".join(f"- {x}" for x in res["sin_paginas"]))
+#|         except Exception as e:
+#|             st.error(f"No se pudo extraer: {e}")
+#|
+#|     # ---------------- 4. Revisar y aprobar
+#|     st.markdown("### ④ Revisar y aprobar")
+#|     pend = pendientes(pid)
+#|     if not pend:
+#|         st.success("No hay textos pendientes de revisión en este documento.")
+#|         return
+#|     st.caption(f"{len(pend)} texto(s) pendientes. Marca «aprobar» solo los que coinciden con el documento oficial. "
+#|                "Puedes corregir el texto antes de aprobar.")
+#|     df = pd.DataFrame([{"aprobar": True, "id": p["id"], "área": p["area"], "competencia": p["competencia"][:50],
+#|                         "tipo": p["tipo"], "grado/ciclo": p["grado"], "página": p["pagina"], "texto": p["texto"]}
+#|                        for p in pend])
+#|     ed = st.data_editor(df, key=f"prog_rev_{pid}_{len(pend)}", hide_index=True, disabled=["id", "área", "competencia",
+#|                         "tipo", "grado/ciclo", "página"])
+#|     marcar = st.checkbox("Marcar como «verificadas» las competencias aprobadas", value=True, key=f"prog_ver_{pid}")
+#|     c1, c2 = st.columns(2)
+#|     if c1.button("✅ Aprobar los marcados", type="primary", key=f"prog_apr_{pid}"):
+#|         for _, r in ed.iterrows():
+#|             if r["aprobar"]:
+#|                 execute("UPDATE curriculo_importado SET texto=%s WHERE id=%s", (str(r["texto"]).strip(), int(r["id"])))
+#|         n = aprobar([int(r["id"]) for _, r in ed.iterrows() if r["aprobar"]], marcar,
+#|                     doc["titulo"] or doc["url"])
+#|         st.success(f"Se aprobaron {n} texto(s) y ya están disponibles para los docentes.")
+#|         st.rerun()
+#|     if c2.button("🗑️ Rechazar los desmarcados", key=f"prog_rec_{pid}"):
+#|         rechazar([int(r["id"]) for _, r in ed.iterrows() if not r["aprobar"]])
+#|         st.rerun()
 #@@ END
 #@@ MODULE v_panel
 #| """Mi Panel: áreas asignadas del docente y guía rápida."""
@@ -2073,7 +2784,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         n = int(st.number_input("¿Cuántas unidades tendrá el año?", 1, 12, 6, key=f"nuni_{aid}"))
 #|     st.caption("La IA propone una situación significativa por unidad, con el problema del contexto, valores y competencias.")
 #|     if confirmar("anual", "✨ Generar situaciones significativas con IA" if not unidades else
-#|                  "🔄 Volver a generar (reemplaza lo actual)", f"anual_{aid}"):
+#|                  "🔄 Volver a generar (reemplaza lo actual)", f"anual_{aid}", asig=asig):
 #|         try:
 #|             with st.spinner("Creando situaciones significativas... (puede tardar un minuto)"):
 #|                 nuevas = _generar_unidades(asig, comps_sel, n)
@@ -2147,6 +2858,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| from curriculo import buscar_competencia, contexto_curricular, transversales
 #| from docx import Document
 #| from ia import generar_texto, pedir_json, preambulo
+#| from examen_unidad import render as render_examen_unidad
 #| from normativa import normativa_vigente
 #| from repo import (cobrar, contenido, crear_sesiones_desde_secuencia, get_doc, get_doc_by_id, guardar_doc,
 #|                   listar_docs)
@@ -2332,7 +3044,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         spw = c2.number_input("Sesiones por semana", 1, 8, entero(d.get("sesiones_por_semana"), 3, 1, 8),
 #|                               key=f"spw_{aid}_{n}_{ver}")
 #|         etiqueta = "✨ Generar unidad con IA" if not doc else "🔄 Volver a generar (reemplaza lo actual)"
-#|         if confirmar("unidad", etiqueta, f"unidad_{aid}_{n}"):
+#|         if confirmar("unidad", etiqueta, f"unidad_{aid}_{n}", asig=asig):
 #|             try:
 #|                 with st.spinner("Armando la unidad... (puede tardar un minuto)"):
 #|                     nueva = _generar_unidad(asig, ua, int(semanas), int(spw))
@@ -2348,7 +3060,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         with st.expander("📥 Cargar una unidad que ya tengo en Word"):
 #|             st.caption("Sube tu unidad (.docx) y la IA la ordena en este formato. Lo importado queda marcado «por verificar».")
 #|             archivo = st.file_uploader("Archivo Word", type=["docx"], key=f"up_{aid}_{n}_{ver}")
-#|             if archivo is not None and confirmar("importar", "Convertir mi unidad", f"imp_{aid}_{n}"):
+#|             if archivo is not None and confirmar("importar", "Convertir mi unidad", f"imp_{aid}_{n}", asig=asig):
 #|                 try:
 #|                     with st.spinner("Leyendo y ordenando tu unidad..."):
 #|                         nueva = _importar_unidad(asig, ua, _texto_de_docx(archivo), int(semanas), int(spw))
@@ -2454,7 +3166,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         st.rerun()
 #|
 #|     with st.expander("🔎 Revisar coherencia con la planificación anual"):
-#|         if confirmar("revision", "Revisar con IA", f"rev_{aid}_{n}"):
+#|         if confirmar("revision", "Revisar con IA", f"rev_{aid}_{n}", asig=asig):
 #|             try:
 #|                 with st.spinner("Revisando..."):
 #|                     prompt = (f"{preambulo()}\nRevisa la coherencia de esta unidad con su situación en la planificación anual. "
@@ -2472,6 +3184,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #|     st.divider()
 #|     vista_previa_y_descarga(doc["id"], f"unidad_{aid}_{n}", abierta=False)
+#|     st.divider()
+#|     render_examen_unidad(asig, doc)
 #|     if listar_docs(aid, "sesion", padre_id=doc["id"]):
 #|         st.button("Siguiente: generar las sesiones →", on_click=ir_a, args=(PAG_SESIONES,), type="primary",
 #|                   key=f"u_next_{aid}_{n}")
@@ -2624,7 +3338,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|             st.success("Todas las sesiones de esta unidad ya tienen contenido.")
 #|             return
 #|         dur = st.number_input("Duración de cada sesión (minutos)", 20, 240, 90, step=5, key=f"mas_dur_{udoc['id']}")
-#|         if confirmar("sesion", f"Generar las {len(faltan)} sesiones", f"mas_{udoc['id']}", veces=len(faltan)):
+#|         if confirmar("sesion", f"Generar las {len(faltan)} sesiones", f"mas_{udoc['id']}", veces=len(faltan), asig=asig):
 #|             barra = st.progress(0.0)
 #|             hechas = 0
 #|             for k, sdoc in enumerate(faltan, 1):
@@ -2662,7 +3376,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     notas = st.text_input("Indicaciones especiales (opcional)", key=f"ses_notas_{sdoc['id']}_{ver}",
 #|                           placeholder="Ej.: aula multigrado, sin proyector, usar material reciclable")
 #|     etiqueta = "✨ Generar sesión con IA" if not d.get("inicio") else "🔄 Volver a generar (reemplaza lo actual)"
-#|     if confirmar("sesion", etiqueta, f"ses_{sdoc['id']}"):
+#|     if confirmar("sesion", etiqueta, f"ses_{sdoc['id']}", asig=asig):
 #|         try:
 #|             with st.spinner("Creando la sesión..."):
 #|                 nuevo = generar_sesion(asig, udata, d, int(duracion), sel, notas)
@@ -2738,7 +3452,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     d = contenido(doc) if doc else {}
 #|     ver_key = f"ver_rub_{sdoc['id']}"
 #|     ver = st.session_state.get(ver_key, 0)
-#|     if confirmar("rubrica", "✨ Generar rúbrica con IA" if not doc else "🔄 Volver a generar la rúbrica", f"rub_{sdoc['id']}"):
+#|     if confirmar("rubrica", "✨ Generar rúbrica con IA" if not doc else "🔄 Volver a generar la rúbrica", f"rub_{sdoc['id']}", asig=asig):
 #|         try:
 #|             prompt = f"""{preambulo()}
 #| Elabora una RÚBRICA de evaluación para esta sesión (nivel {asig['nivel']}, grado {asig['grado']}, área {asig['area']}).
@@ -2788,7 +3502,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     ver_key = f"ver_fic_{sdoc['id']}"
 #|     ver = st.session_state.get(ver_key, 0)
 #|     n_act = st.number_input("Número de actividades", 3, 12, 6, key=f"fic_n_{sdoc['id']}")
-#|     if confirmar("ficha", "✨ Generar ficha con IA" if not doc else "🔄 Volver a generar la ficha", f"fic_{sdoc['id']}"):
+#|     if confirmar("ficha", "✨ Generar ficha con IA" if not doc else "🔄 Volver a generar la ficha", f"fic_{sdoc['id']}", asig=asig):
 #|         try:
 #|             prompt = f"""{preambulo()}
 #| Elabora una FICHA DE TRABAJO para estudiantes de {asig['grado']} ({asig['nivel']}), área {asig['area']}, región {asig['region']}.
@@ -2845,7 +3559,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     n_preg = c1.number_input("Número de preguntas", 3, 20, 8, key=f"exa_n_{sdoc['id']}")
 #|     tipos = c2.selectbox("Tipo de preguntas", ["Mixto", "Solo opción múltiple", "Solo desarrollo"], key=f"exa_t_{sdoc['id']}")
 #|     total = c3.number_input("Puntaje total", 5, 100, 20, key=f"exa_p_{sdoc['id']}")
-#|     if confirmar("examen", "✨ Generar examen con IA" if not doc else "🔄 Volver a generar el examen", f"exa_{sdoc['id']}"):
+#|     if confirmar("examen", "✨ Generar examen con IA" if not doc else "🔄 Volver a generar el examen", f"exa_{sdoc['id']}", asig=asig):
 #|         try:
 #|             prompt = f"""{preambulo()}
 #| Elabora un EXAMEN para estudiantes de {asig['grado']} ({asig['nivel']}), área {asig['area']}.
@@ -2915,8 +3629,9 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #| TIPOS = {"anual": ("📅", "Planificación anual", PAG_ANUAL), "unidad": ("📚", "Unidad", PAG_UNIDADES),
 #|          "sesion": ("📝", "Sesión", PAG_SESIONES), "rubrica": ("📊", "Rúbrica", PAG_SESIONES),
-#|          "ficha": ("📄", "Ficha", PAG_SESIONES), "examen": ("📋", "Examen", PAG_SESIONES)}
-#| ORDEN = {"anual": 0, "unidad": 1, "sesion": 2, "rubrica": 3, "ficha": 4, "examen": 5}
+#|          "ficha": ("📄", "Ficha", PAG_SESIONES), "examen": ("📋", "Examen de sesión", PAG_SESIONES),
+#|          "examen_unidad": ("🧪", "Examen de unidad", PAG_UNIDADES)}
+#| ORDEN = {"anual": 0, "unidad": 1, "sesion": 2, "rubrica": 3, "ficha": 4, "examen": 5, "examen_unidad": 6}
 #|
 #|
 #| def render():
@@ -2987,6 +3702,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| from normativa import revisar_fuente
 #| from repo import COSTOS_DEFAULT, NOMBRES_COSTO, config_get, config_set, costo_de, mapa_colegios
 #| from util import a_lista, entero, norm, s
+#| import v_programas
 #|
 #| ROLES = ["docente", "director", "admin"]
 #| TIPOS_NORMA = ["curricular", "pedagógico/normativo", "administrativo"]
@@ -3179,6 +3895,20 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     st.subheader("Base curricular verificada")
 #|     st.caption("La IA solo usa los textos de esta base. Competencias y capacidades vienen precargadas (marcadas «por verificar»). "
 #|                "Los **desempeños** los cargas tú desde los Programas Curriculares oficiales del MINEDU.")
+#|     exigir = st.checkbox("🔒 Bloquear la generación en las áreas cuyo currículo aún no esté verificado "
+#|                          "(los docentes solo podrán generar cuando todas las competencias estén verificadas y tengan desempeños)",
+#|                          value=config_get("exigir_verificado", "0") == "1", key="cur_exigir")
+#|     if exigir != (config_get("exigir_verificado", "0") == "1"):
+#|         config_set("exigir_verificado", "1" if exigir else "0")
+#|         st.success("Configuración guardada.")
+#|     t0, t_resto = st.tabs(["📥 Programas oficiales (PDF)", "✏️ Editar currículo"])
+#|     with t0:
+#|         v_programas.render()
+#|     with t_resto:
+#|         _panel_curriculo_editor()
+#|
+#|
+#| def _panel_curriculo_editor():
 #|     c1, c2 = st.columns(2)
 #|     nivel = c1.selectbox("Nivel", NIVELES, key="cur_nivel")
 #|     areas = areas_de(nivel)
