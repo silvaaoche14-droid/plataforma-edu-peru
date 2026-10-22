@@ -1,8 +1,9 @@
-   streamlit
-   mysql-connector-python
-   pandas
-   openpyxl
-   requests
-   beautifulsoup4
-   python-docx
-   bcrypt
+streamlit
+mysql-connector-python
+pandas
+openpyxl
+requests
+beautifulsoup4
+python-docx
+bcrypt
+pypdf
