@@ -7,7 +7,7 @@ import linecache
 import sys
 import types
 
-_ORDEN = ['util', 'db', 'repo', 'curriculo', 'render', 'exportar', 'ia', 'normativa', 'programas', 'auth', 'ui', 'examen_unidad', 'v_curriculo', 'v_programas', 'v_panel', 'v_anual', 'v_unidades', 'v_sesiones', 'v_biblioteca', 'v_admin']
+_ORDEN = ['util', 'db', 'repo', 'curriculo', 'render', 'exportar', 'ia', 'normativa', 'programas', 'lineamientos', 'calendario', 'auth', 'ui', 'examen_unidad', 'v_curriculo', 'v_programas', 'v_calendario', 'v_panel', 'v_anual', 'v_unidades', 'v_sesiones', 'v_biblioteca', 'v_admin']
 
 
 def _cargar_modulos():
@@ -41,14 +41,55 @@ _cargar_modulos()
 import streamlit as st
 
 st.set_page_config(page_title="EduPerú IA - Portal Docente", layout="wide", page_icon="✏️",
-                   initial_sidebar_state="auto")
+                   initial_sidebar_state="expanded")
+
+# Cada ejecución empieza con la memoria de consultas vacía (así los datos nunca quedan viejos)
+st.session_state["_memo"] = {}
 
 st.markdown("""
 <style>
-.main .block-container { padding-top: 1.5rem; padding-bottom: 3rem; max-width: 1200px; }
+:root { --p1:#7c3aed; --p2:#c026d3; --acc:#f59e0b; }
+.main .block-container { padding-top: 1.2rem; padding-bottom: 3rem; max-width: 1200px; }
 div[data-testid="stForm"] { border: none; }
-div[role="radiogroup"] { gap: .35rem; }
-@media (max-width: 768px) { .main .block-container { padding-left: 1rem; padding-right: 1rem; } }
+
+/* sin el "muñequito" de carga ni la atenuación de la pantalla */
+[data-testid="stStatusWidget"] { display: none !important; }
+[data-stale="true"], .stApp [data-stale="true"] { opacity: 1 !important; transition: none !important; }
+
+/* barra lateral */
+[data-testid="stSidebar"] { background: linear-gradient(180deg, #faf5ff 0%, #ffffff 70%); border-right: 1px solid #efe7fb; }
+[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
+.brand { font-size: 1.45rem; font-weight: 800; background: linear-gradient(90deg, var(--p1), var(--p2));
+         -webkit-background-clip: text; background-clip: text; color: transparent; margin-bottom: .2rem; }
+.usercard { background: #fff; border: 1px solid #efe7fb; border-radius: 14px; padding: .6rem .8rem; margin: .4rem 0 .8rem;
+            box-shadow: 0 1px 4px rgba(124,58,237,.08); }
+.usercard b { font-size: .95rem; } .usercard span { font-size: .8rem; color: #6b7280; }
+.chip { display: inline-block; background: rgba(255,255,255,.22); color: #fff; border-radius: 999px; padding: .15rem .7rem;
+        font-size: .82rem; margin-top: .5rem; }
+.usercard .chip { background: #f3e8ff; color: #6d28d9; margin-top: .3rem; }
+
+/* menú lateral */
+[data-testid="stSidebar"] div[role="radiogroup"] { gap: 3px; }
+[data-testid="stSidebar"] div[role="radiogroup"] > label { padding: .55rem .8rem; border-radius: 12px; width: 100%; cursor: pointer; }
+[data-testid="stSidebar"] div[role="radiogroup"] > label:hover { background: #f3e8ff; }
+[data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child { display: none; }
+[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) { background: linear-gradient(90deg, var(--p1), var(--p2)); }
+[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) * { color: #fff !important; font-weight: 600; }
+
+/* bienvenida y tarjetas */
+.hero { background: linear-gradient(120deg, #7c3aed 0%, #c026d3 60%, #f59e0b 130%); color: #fff; border-radius: 20px;
+        padding: 1.4rem 1.6rem; margin-bottom: 1.2rem; box-shadow: 0 6px 20px rgba(124,58,237,.25); }
+.hero-t { font-size: 1.7rem; font-weight: 800; } .hero-s { opacity: .95; margin-top: .25rem; max-width: 760px; }
+div[data-testid="stVerticalBlockBorderWrapper"] { border-radius: 16px; }
+.tool-i { font-size: 2rem; line-height: 1; } .tool-t { font-weight: 700; margin-top: .3rem; }
+.tool-d { color: #6b7280; font-size: .84rem; min-height: 2.5rem; margin-bottom: .4rem; }
+
+/* botones principales */
+button[kind="primary"], button[data-testid="stBaseButton-primary"] {
+    background: linear-gradient(90deg, var(--p1), var(--p2)); border: 0; color: #fff; border-radius: 12px; }
+button[kind="primary"]:hover, button[data-testid="stBaseButton-primary"]:hover { filter: brightness(1.08); }
+button[kind="secondary"], button[data-testid="stBaseButton-secondary"] { border-radius: 12px; }
+@media (max-width: 768px) { .main .block-container { padding-left: 1rem; padding-right: 1rem; } .hero-t { font-size: 1.3rem; } }
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,10 +103,9 @@ except Exception as e:
 
 from auth import pantalla_login  # noqa: E402
 from repo import get_usuario, listar_asignaciones  # noqa: E402
-from ui import (PAG_ADMIN, PAG_ANUAL, PAG_BIBLIO, PAG_CURRICULO, PAG_PANEL, PAG_SESIONES,  # noqa: E402
-                PAG_UNIDADES,
-                mostrar_flash)
-import v_admin, v_anual, v_biblioteca, v_curriculo, v_panel, v_sesiones, v_unidades  # noqa: E402,E401
+from ui import (PAG_ADMIN, PAG_ANUAL, PAG_BIBLIO, PAG_CALENDARIO, PAG_CURRICULO, PAG_PANEL,  # noqa: E402
+                PAG_TEMAS, mostrar_flash)
+import v_admin, v_anual, v_biblioteca, v_calendario, v_curriculo, v_panel, v_sesiones  # noqa: E402,E401
 
 if not st.session_state.get("logged_in"):
     pantalla_login()
@@ -77,46 +117,46 @@ if not usuario or usuario["activo"] == 0:
         del st.session_state[k]
     st.rerun()
 es_admin = usuario["rol"] == "admin"
-
-# --- Barra lateral: perfil, créditos y salir
-with st.sidebar:
-    st.title("✏️ EduPerú IA")
-    st.write(f"👤 **{usuario['nombre']}**" + (" · 🛡️ Admin" if es_admin else ""))
-    st.write("🎟️ Créditos: **ilimitados**" if es_admin else f"🎟️ Créditos: **{usuario['creditos']}**")
-    st.caption("Alineado a CNEB y RM N.° 501-2025-MINEDU")
-    if st.button("🚪 Cerrar sesión", use_container_width=True):
-        for k in list(st.session_state.keys()):
-            del st.session_state[k]
-        st.rerun()
-
-# --- Navegación (arriba, visible también en el celular)
-paginas = [PAG_PANEL, PAG_ANUAL, PAG_UNIDADES, PAG_SESIONES, PAG_CURRICULO, PAG_BIBLIO] + ([PAG_ADMIN] if es_admin else [])
-if st.session_state.get("nav") not in paginas:
-    st.session_state["nav"] = PAG_PANEL
-pagina = st.radio("Menú", paginas, key="nav", horizontal=True, label_visibility="collapsed")
-
-# --- Área activa
 asigs = listar_asignaciones(usuario["id"])
 ids = [a["id"] for a in asigs]
 if ids:
     if st.session_state.get("area_id") not in ids:
         st.session_state["area_id"] = ids[0]
-    st.selectbox("📌 Trabajando en:", ids, key="area_id",
-                 format_func=lambda i: next(f"{a['area']} · {a['grado']} · Sección {a['seccion'] or '—'}"
-                                            for a in asigs if a["id"] == i))
 else:
     st.session_state["area_id"] = None
-st.divider()
-mostrar_flash()
 
+paginas = [PAG_PANEL, PAG_ANUAL, PAG_TEMAS, PAG_CALENDARIO, PAG_CURRICULO, PAG_BIBLIO] + ([PAG_ADMIN] if es_admin else [])
+if st.session_state.get("nav") not in paginas:
+    st.session_state["nav"] = PAG_PANEL
+
+# --- Barra lateral: marca, perfil, curso activo, menú y salir
+with st.sidebar:
+    st.markdown("<div class='brand'>✏️ EduPerú IA</div>", unsafe_allow_html=True)
+    creditos = "ilimitados" if es_admin else usuario["creditos"]
+    st.markdown(f"<div class='usercard'><b>👤 {usuario['nombre']}</b>{' · 🛡️ Admin' if es_admin else ''}<br>"
+                f"<span class='chip'>🎟️ Créditos: {creditos}</span></div>", unsafe_allow_html=True)
+    if ids:
+        st.selectbox("📌 Curso activo", ids, key="area_id",
+                     format_func=lambda i: next(f"{a['area']} · {a['grado']} · {a['seccion'] or '—'}" for a in asigs if a["id"] == i))
+    else:
+        st.caption("📌 Aún no tienes cursos. Crea uno en Inicio.")
+    pagina = st.radio("Menú", paginas, key="nav", label_visibility="collapsed")
+    st.divider()
+    if st.button("🚪 Cerrar sesión", use_container_width=True):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
+    st.caption("Alineado a CNEB y RM N.° 501-2025-MINEDU")
+
+mostrar_flash()
 if pagina == PAG_PANEL:
     v_panel.render()
 elif pagina == PAG_ANUAL:
     v_anual.render()
-elif pagina == PAG_UNIDADES:
-    v_unidades.render()
-elif pagina == PAG_SESIONES:
+elif pagina == PAG_TEMAS:
     v_sesiones.render()
+elif pagina == PAG_CALENDARIO:
+    v_calendario.render()
 elif pagina == PAG_CURRICULO:
     v_curriculo.render()
 elif pagina == PAG_BIBLIO:
@@ -189,6 +229,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #@@ END
 #@@ MODULE db
 #| """Conexión a MySQL (Aiven) y creación / actualización automática del esquema."""
+#| import copy
+#|
 #| import streamlit as st
 #| import mysql.connector
 #| from mysql.connector import pooling
@@ -218,16 +260,47 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         return mysql.connector.connect(**_cfg())
 #|
 #|
+#| def _memo():
+#|     """Memoria de consultas de UNA ejecución de la página (se vacía en cada ejecución y en cada escritura)."""
+#|     try:
+#|         return st.session_state.setdefault("_memo", {})
+#|     except Exception:
+#|         return {}
+#|
+#|
 #| def fetch(sql, params=(), one=False):
+#|     memo = _memo()
+#|     try:
+#|         clave = (sql, tuple(params), one)
+#|         if clave in memo:
+#|             return copy.deepcopy(memo[clave])
+#|     except TypeError:
+#|         clave = None
 #|     conn = conexion()
 #|     try:
 #|         cur = conn.cursor(dictionary=True, buffered=True)
 #|         cur.execute(sql, params)
 #|         filas = cur.fetchone() if one else cur.fetchall()
 #|         cur.close()
-#|         return filas
 #|     finally:
 #|         conn.close()
+#|     if clave is not None:
+#|         memo[clave] = copy.deepcopy(filas)
+#|     return filas
+#|
+#|
+#| def _tras_escribir(sql):
+#|     """Después de escribir: se vacía la memoria de la página y, si cambió el currículo/configuración, la caché."""
+#|     try:
+#|         st.session_state["_memo"] = {}
+#|     except Exception:
+#|         pass
+#|     bajo = sql.lower()
+#|     if any(x in bajo for x in ("curriculo_", " config", "normativa_", "asignaciones")):
+#|         try:
+#|             st.cache_data.clear()
+#|         except Exception:
+#|             pass
 #|
 #|
 #| def execute(sql, params=()):
@@ -239,9 +312,10 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         conn.commit()
 #|         res = (cur.lastrowid, cur.rowcount)
 #|         cur.close()
-#|         return res
 #|     finally:
 #|         conn.close()
+#|     _tras_escribir(sql)
+#|     return res
 #|
 #|
 #| def execute_many(sql, filas):
@@ -255,6 +329,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         cur.close()
 #|     finally:
 #|         conn.close()
+#|     _tras_escribir(sql)
 #|
 #|
 #| def _asegurar_columna(cur, tabla, columna, ddl):
@@ -364,6 +439,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         area VARCHAR(80) NOT NULL,
 #|         seccion VARCHAR(20),
 #|         caracterizacion LONGTEXT,
+#|         lineamientos_fuente VARCHAR(300),
 #|         creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 #|         INDEX idx_asig_usuario (usuario_id)
 #|     )""",
@@ -406,6 +482,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         grado VARCHAR(20) NOT NULL,
 #|         texto TEXT NOT NULL,
 #|         orden INT DEFAULT 0,
+#|         asignacion_id INT NULL,
 #|         INDEX idx_des_comp_grado (competencia_id, grado)
 #|     )""",
 #|     """CREATE TABLE IF NOT EXISTS curriculo_transversal (
@@ -419,6 +496,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         competencia_id INT NOT NULL,
 #|         ciclo VARCHAR(10) NOT NULL,
 #|         texto TEXT NOT NULL,
+#|         asignacion_id INT NULL,
 #|         INDEX idx_est_comp (competencia_id, ciclo)
 #|     )""",
 #|     """CREATE TABLE IF NOT EXISTS curriculo_pdf (
@@ -453,6 +531,18 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         creado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
 #|         INDEX idx_imp_pdf (pdf_id, estado)
 #|     )""",
+#|     """CREATE TABLE IF NOT EXISTS eventos (
+#|         id INT AUTO_INCREMENT PRIMARY KEY,
+#|         usuario_id INT NOT NULL,
+#|         asignacion_id INT NULL,
+#|         fecha DATE NOT NULL,
+#|         tipo VARCHAR(20) DEFAULT 'actividad',
+#|         titulo VARCHAR(255) NOT NULL,
+#|         detalle TEXT,
+#|         doc_id INT NULL,
+#|         creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+#|         INDEX idx_ev_usuario_fecha (usuario_id, fecha)
+#|     )""",
 #|     """CREATE TABLE IF NOT EXISTS config (
 #|         clave VARCHAR(60) PRIMARY KEY,
 #|         valor VARCHAR(255)
@@ -484,6 +574,9 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #|         for col, ddl in [("fuente", "VARCHAR(600)"), ("verificado_en", "DATETIME NULL")]:
 #|             _asegurar_columna(cur, "curriculo_competencias", col, ddl)
+#|         _asegurar_columna(cur, "curriculo_desempenos", "asignacion_id", "INT NULL")
+#|         _asegurar_columna(cur, "curriculo_estandares", "asignacion_id", "INT NULL")
+#|         _asegurar_columna(cur, "asignaciones", "lineamientos_fuente", "VARCHAR(300)")
 #|
 #|         cur.execute("SELECT COUNT(*) FROM normativa_fuentes")
 #|         if cur.fetchone()[0] == 0:
@@ -507,7 +600,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #| ORDEN_NIVEL = {"Inicial": 0, "Primaria": 1, "Secundaria": 2}
 #|
 #| COSTOS_DEFAULT = {"caracterizacion": 0, "anual": 2, "unidad": 2, "sesion": 1,
-#|                   "rubrica": 1, "ficha": 1, "examen": 1, "examen_unidad": 2, "importar": 1, "revision": 1}
+#|                   "rubrica": 1, "ficha": 1, "examen": 1, "examen_unidad": 2, "importar": 1, "revision": 1,
+#|                   "desafio": 1, "lineamientos": 1, "calendario_ia": 1}
 #| NOMBRES_COSTO = {
 #|     "caracterizacion": "Boceto de caracterización del estudiante",
 #|     "anual": "Situaciones significativas (planificación anual)",
@@ -519,6 +613,9 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     "examen_unidad": "Examen de unidad / bimestre",
 #|     "importar": "Importar unidad desde Word",
 #|     "revision": "Revisión de coherencia",
+#|     "desafio": "Desafíos de aprendizaje",
+#|     "lineamientos": "Traer o leer lineamientos con IA",
+#|     "calendario_ia": "Sugerencias del calendario con IA",
 #| }
 #|
 #|
@@ -588,7 +685,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     return nuevo
 #|
 #|
-#| CAMPOS_ASIG = {"institucion", "director", "docente", "region", "seccion", "caracterizacion", "ciclo_escolar"}
+#| CAMPOS_ASIG = {"institucion", "director", "docente", "region", "seccion", "caracterizacion", "ciclo_escolar",
+#|                "lineamientos_fuente"}
 #|
 #|
 #| def actualizar_asignacion(aid, **campos):
@@ -601,7 +699,15 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #| def borrar_asignacion(aid):
 #|     execute("DELETE FROM documentos WHERE asignacion_id=%s", (aid,))
+#|     execute("DELETE FROM eventos WHERE asignacion_id=%s", (aid,))
+#|     execute("DELETE FROM curriculo_desempenos WHERE asignacion_id=%s", (aid,))
+#|     execute("DELETE FROM curriculo_estandares WHERE asignacion_id=%s", (aid,))
 #|     execute("DELETE FROM asignaciones WHERE id=%s", (aid,))
+#|
+#|
+#| def borrar_todas_asignaciones(uid):
+#|     for a in fetch("SELECT id FROM asignaciones WHERE usuario_id=%s", (uid,)):
+#|         borrar_asignacion(a["id"])
 #|
 #|
 #| def resumen_asignacion(aid):
@@ -656,7 +762,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| def guardar_doc(uid, aid, tipo, numero, titulo, data, padre_id=None, color=None, normativa=None):
 #|     """Crea o actualiza un documento. Devuelve su id."""
 #|     clave_num = numero if tipo in ("unidad", "sesion", "examen_unidad") else None
-#|     clave_pad = padre_id if tipo in ("sesion", "rubrica", "ficha", "examen") else None
+#|     clave_pad = padre_id if tipo in ("sesion", "rubrica", "ficha", "examen", "desafio") else None
 #|     existente = get_doc(aid, tipo, clave_num, clave_pad)
 #|     texto = json.dumps(data, ensure_ascii=False)
 #|     titulo = (titulo or "")[:255]
@@ -919,12 +1025,14 @@ elif pagina == PAG_ADMIN and es_admin:
 #| # ------------------------------------------------------------------
 #| # CONSULTAS
 #| # ------------------------------------------------------------------
+#| @st.cache_data(ttl=300, show_spinner=False)
 #| def areas_de(nivel):
 #|     filas = fetch("SELECT area, MIN(id) AS m FROM curriculo_competencias WHERE nivel=%s GROUP BY area ORDER BY m",
 #|                   (nivel,))
 #|     return [f["area"] for f in filas]
 #|
 #|
+#| @st.cache_data(ttl=300, show_spinner=False)
 #| def competencias_de(nivel, area):
 #|     filas = fetch("SELECT id, nombre, verificado FROM curriculo_competencias "
 #|                   "WHERE nivel=%s AND area=%s ORDER BY orden, id", (nivel, area))
@@ -941,14 +1049,27 @@ elif pagina == PAG_ADMIN and es_admin:
 #|              "capacidades": por.get(f["id"], [])} for f in filas]
 #|
 #|
-#| def desempenos_de(competencia_id, grado):
-#|     return fetch("SELECT id, texto FROM curriculo_desempenos WHERE competencia_id=%s AND grado=%s ORDER BY orden, id",
-#|                  (competencia_id, grado))
+#| @st.cache_data(ttl=300, show_spinner=False)
+#| def desempenos_de(competencia_id, grado, aid=None):
+#|     """Desempeños de una competencia y grado. Si el curso (aid) cargó lineamientos propios, se usan esos."""
+#|     if aid:
+#|         propios = fetch("SELECT id, texto FROM curriculo_desempenos WHERE competencia_id=%s AND grado=%s "
+#|                         "AND asignacion_id=%s ORDER BY orden, id", (competencia_id, grado, aid))
+#|         if propios:
+#|             return propios
+#|     return fetch("SELECT id, texto FROM curriculo_desempenos WHERE competencia_id=%s AND grado=%s "
+#|                  "AND asignacion_id IS NULL ORDER BY orden, id", (competencia_id, grado))
 #|
 #|
-#| def estandar_de(competencia_id, ciclo):
-#|     f = fetch("SELECT texto FROM curriculo_estandares WHERE competencia_id=%s AND ciclo=%s ORDER BY id LIMIT 1",
-#|               (competencia_id, ciclo), one=True)
+#| @st.cache_data(ttl=300, show_spinner=False)
+#| def estandar_de(competencia_id, ciclo, aid=None):
+#|     if aid:
+#|         f = fetch("SELECT texto FROM curriculo_estandares WHERE competencia_id=%s AND ciclo=%s AND asignacion_id=%s "
+#|                   "ORDER BY id LIMIT 1", (competencia_id, ciclo, aid), one=True)
+#|         if f:
+#|             return f["texto"]
+#|     f = fetch("SELECT texto FROM curriculo_estandares WHERE competencia_id=%s AND ciclo=%s AND asignacion_id IS NULL "
+#|               "ORDER BY id LIMIT 1", (competencia_id, ciclo), one=True)
 #|     return f["texto"] if f else ""
 #|
 #|
@@ -964,7 +1085,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     if not comps:
 #|         return "Esta área no tiene competencias cargadas en la base curricular oficial."
 #|     sin_ver = [c["nombre"] for c in comps if not c["verificado"]]
-#|     sin_des = [c["nombre"] for c in comps if not desempenos_de(c["id"], asig["grado"])]
+#|     sin_des = [c["nombre"] for c in comps if not desempenos_de(c["id"], asig["grado"], asig.get("id"))]
 #|     if sin_ver or sin_des:
 #|         return ("El administrador aún no verificó el currículo oficial de esta área para este grado "
 #|                 f"({len(sin_ver)} competencia(s) sin verificar, {len(sin_des)} sin desempeños). "
@@ -972,14 +1093,14 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     return None
 #|
 #|
-#| def estado_area(nivel, area, grado):
+#| def estado_area(nivel, area, grado, aid=None):
 #|     """(n competencias, n verificadas, n con desempeños para el grado)."""
 #|     comps = competencias_de(nivel, area)
-#|     con_des = sum(1 for c in comps if desempenos_de(c["id"], grado))
+#|     con_des = sum(1 for c in comps if desempenos_de(c["id"], grado, aid))
 #|     return len(comps), sum(1 for c in comps if c["verificado"]), con_des
 #|
 #|
-#| @st.cache_data(ttl=120, show_spinner=False)
+#| @st.cache_data(ttl=300, show_spinner=False)
 #| def transversales():
 #|     """(competencias transversales, enfoques) → listas de dicts con 'nombre' y 'items'."""
 #|     filas = fetch("SELECT tipo, nombre, detalle FROM curriculo_transversal ORDER BY id")
@@ -997,14 +1118,14 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         pass
 #|
 #|
-#| def contexto_curricular(nivel, area, grado, nombres):
+#| def contexto_curricular(nivel, area, grado, nombres, aid=None):
 #|     """Texto para el prompt + mapa {nombre competencia: {'comp':..., 'des': [...]}} (desempeños numerados D1..Dn)."""
 #|     objetivo = {norm(n) for n in nombres}
 #|     lineas, mapa = [], {}
 #|     for c in competencias_de(nivel, area):
 #|         if norm(c["nombre"]) not in objetivo:
 #|             continue
-#|         ds = desempenos_de(c["id"], grado)
+#|         ds = desempenos_de(c["id"], grado, aid)
 #|         mapa[c["nombre"]] = {"comp": c, "des": ds}
 #|         lineas.append(f"COMPETENCIA: {c['nombre']}")
 #|         lineas.append("  Capacidades: " + "; ".join(c["capacidades"]))
@@ -1105,6 +1226,14 @@ elif pagina == PAG_ADMIN and es_admin:
 #|              for u in d.get("unidades", [])]
 #|     b.append(("tabla", ["Unidad", "Título", "Problema identificado", "Situación significativa",
 #|                         "Valores observables", "Competencias", "Capacidades a trabajar", "Duración"], filas))
+#|     if any(u.get("temas") for u in d.get("unidades", [])):
+#|         b.append(("sec", "V. TEMAS POR UNIDAD (CLASES)"))
+#|         temas = []
+#|         for u in d.get("unidades", []):
+#|             for i, tm in enumerate(u.get("temas") or [], 1):
+#|                 temas.append([f"Unidad {u.get('numero')}", f"Clase {i}", tm.get("titulo"), tm.get("competencia"),
+#|                               tm.get("desempeno_texto")])
+#|         b.append(("tabla", ["Unidad", "Clase", "Tema", "Competencia", "Desempeño que desarrolla"], temas))
 #|     return b + _bloques_transversales(trans)
 #|
 #|
@@ -1176,6 +1305,27 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         b.append(("p", "Respuesta: ______________________________________________"))
 #|     b += [("salto",), ("sec", "SOLUCIONARIO (SOLO PARA EL DOCENTE)"),
 #|           ("tabla", ["N.°", "Respuesta esperada"], [[a.get("numero"), a.get("respuesta")] for a in d.get("actividades", [])])]
+#|     return b
+#|
+#|
+#| def bloques_desafio(asig, pdata, d):
+#|     b = [("h", (d.get("titulo") or f"DESAFÍOS DE APRENDIZAJE — {pdata.get('titulo', '')}").upper()),
+#|          ("kv", [("Institución educativa", asig.get("institucion")), ("Docente", asig.get("docente")),
+#|                  ("Área", asig.get("area")), ("Grado y sección", f"{asig.get('grado', '')} {asig.get('seccion') or ''}"),
+#|                  ("Tema o unidad", pdata.get("titulo")), ("Modalidad", d.get("modalidad"))], 2),
+#|          ("sec", "PRESENTACIÓN"), ("p", d.get("introduccion")), ("sec", "DESAFÍOS")]
+#|     for x in d.get("desafios", []):
+#|         b.append(("sub", f"Desafío {x.get('numero')}: {s(x.get('nombre'))}  ({x.get('nivel') or ''} · {x.get('puntos') or ''} pts)"))
+#|         b.append(("p", x.get("reto")))
+#|         if x.get("pasos"):
+#|             b.append(("ul", x.get("pasos")))
+#|         b.append(("p", "Producto: " + s(x.get("producto"))))
+#|         if x.get("criterios"):
+#|             b.append(("p", "Lo lograrás si:"))
+#|             b.append(("ul", x.get("criterios")))
+#|     b += [("salto",), ("sec", "HOJA DE SEGUIMIENTO (SOLO PARA EL DOCENTE)"),
+#|           ("tabla", ["Estudiante"] + [f"D{x.get('numero')}" for x in d.get("desafios", [])] + ["Total"],
+#|            [[""] * (len(d.get("desafios", [])) + 2) for _ in range(10)])]
 #|     return b
 #|
 #|
@@ -1399,7 +1549,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #| """Convierte un documento guardado en bloques listos para vista previa y Word."""
 #| from curriculo import competencias_de, transversales
 #| from repo import contenido, get_asignacion, get_doc_by_id
-#| from render import bloques_anual, bloques_unidad, bloques_sesion, bloques_rubrica, bloques_ficha, bloques_examen
+#| from render import (bloques_anual, bloques_desafio, bloques_examen, bloques_ficha, bloques_rubrica,
+#|                     bloques_sesion, bloques_unidad)
 #| from util import norm, slug
 #|
 #|
@@ -1420,6 +1571,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     pdata = contenido(padre) if padre else {}
 #|     if tipo == "sesion":
 #|         return bloques_sesion(asig, pdata, d, trans), False, f"sesion_{doc.get('numero', 1)}_{base}.docx"
+#|     if tipo == "desafio":
+#|         return bloques_desafio(asig, pdata, d), False, f"desafios_{base}.docx"
 #|     if tipo == "examen_unidad":
 #|         return bloques_examen(asig, pdata, d), False, f"examen_unidad_{doc.get('numero', 1)}_{base}.docx"
 #|     if tipo == "rubrica":
@@ -1847,14 +2000,12 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     return 0
 #|
 #|
-#| def extraer(pdf_id, nivel, areas=None, progreso=None):
-#|     """Extrae desempeños y estándares del PDF ya leído. Devuelve un resumen con contadores."""
-#|     filas = fetch("SELECT pagina, texto FROM curriculo_pdf_paginas WHERE pdf_id=%s ORDER BY pagina", (pdf_id,))
-#|     if not filas:
-#|         raise RuntimeError("Primero hay que descargar y leer el PDF.")
-#|     paginas = [(f["pagina"], f["texto"], norm(f["texto"])) for f in filas]
+#| def extraer_items(paginas, nivel, trabajos, progreso=None):
+#|     """Núcleo de la extracción: devuelve (items, resumen).
+#|     paginas = [(n, texto, texto_normalizado)], trabajos = [(area, competencia)].
+#|     item = (competencia_id, tipo, grado_o_ciclo, texto_verificado, pagina)."""
 #|     resumen = {"verificados": 0, "descartados": 0, "sin_paginas": []}
-#|     trabajos = [(a, c) for a in (areas or areas_de(nivel)) for c in competencias_de(nivel, a)]
+#|     items = []
 #|     for k, (area, c) in enumerate(trabajos, 1):
 #|         if progreso:
 #|             progreso(k / len(trabajos), f"{area} · {c['nombre'][:60]}")
@@ -1866,7 +2017,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         plano = " ".join(p[2] for p in cand)
 #|         texto = "\n".join(f"[Página {p[0]}]\n{p[1]}" for p in cand)[:24000]
 #|         try:
-#|             datos, _ = pedir_json(f"""Del siguiente texto del Programa Curricular oficial del MINEDU (Perú), nivel {nivel}, extrae para la competencia «{c['nombre']}»:
+#|             datos, _ = pedir_json(f"""Del siguiente texto de un Programa Curricular (lineamientos oficiales, Perú), nivel {nivel}, extrae para la competencia «{c['nombre']}»:
 #| - "desempenos": los desempeños de cada grado ({', '.join(GRADOS[nivel])}). Cada uno con "grado" y "texto".
 #| - "estandares": el estándar de aprendizaje de cada ciclo. Cada uno con "ciclo" (II, III, IV, V, VI o VII) y "texto".
 #| COPIA cada texto EXACTAMENTE como aparece en el documento, sin cambiar, resumir ni agregar palabras. Si no encuentras algo, no lo incluyas. No inventes.
@@ -1877,9 +2028,6 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         except Exception:
 #|             resumen["sin_paginas"].append(f"{area}: {c['nombre']} (la IA no respondió)")
 #|             continue
-#|         execute("DELETE FROM curriculo_importado WHERE pdf_id=%s AND competencia_id=%s AND estado='pendiente'",
-#|                 (pdf_id, c["id"]))
-#|         nuevos = []
 #|         for tipo, lista, mapear in (("desempeno", datos.get("desempenos") or [], lambda x: mapear_grado(x.get("grado"), nivel)),
 #|                                     ("estandar", datos.get("estandares") or [], lambda x: mapear_ciclo(x.get("ciclo")))):
 #|             for x in lista:
@@ -1888,12 +2036,35 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                 clave_g, t = mapear(x), s(x.get("texto"))
 #|                 tn = norm(t)
 #|                 if clave_g and len(tn) > 25 and tn in plano:
-#|                     nuevos.append((pdf_id, c["id"], tipo, clave_g, t, _pagina_de(tn, cand)))
+#|                     items.append((c["id"], tipo, clave_g, t, _pagina_de(tn, cand)))
 #|                     resumen["verificados"] += 1
 #|                 else:
 #|                     resumen["descartados"] += 1
-#|         execute_many("INSERT INTO curriculo_importado (pdf_id, competencia_id, tipo, grado, texto, pagina) "
-#|                      "VALUES (%s,%s,%s,%s,%s,%s)", nuevos)
+#|     return items, resumen
+#|
+#|
+#| def paginas_guardadas(pdf_id):
+#|     filas = fetch("SELECT pagina, texto FROM curriculo_pdf_paginas WHERE pdf_id=%s ORDER BY pagina", (pdf_id,))
+#|     if not filas:
+#|         raise RuntimeError("Primero hay que descargar y leer el PDF.")
+#|     return [(f["pagina"], f["texto"], norm(f["texto"])) for f in filas]
+#|
+#|
+#| def poner_en_cola(pdf_id, items):
+#|     """Deja los textos extraídos como «pendientes» para que el administrador los apruebe."""
+#|     for cid in {i[0] for i in items}:
+#|         execute("DELETE FROM curriculo_importado WHERE pdf_id=%s AND competencia_id=%s AND estado='pendiente'",
+#|                 (pdf_id, cid))
+#|     execute_many("INSERT INTO curriculo_importado (pdf_id, competencia_id, tipo, grado, texto, pagina) "
+#|                  "VALUES (%s,%s,%s,%s,%s,%s)", [(pdf_id,) + i for i in items])
+#|
+#|
+#| def extraer(pdf_id, nivel, areas=None, progreso=None):
+#|     """Extrae desempeños y estándares del PDF ya leído y los deja pendientes de aprobación."""
+#|     paginas = paginas_guardadas(pdf_id)
+#|     trabajos = [(a, c) for a in (areas or areas_de(nivel)) for c in competencias_de(nivel, a)]
+#|     items, resumen = extraer_items(paginas, nivel, trabajos, progreso)
+#|     poner_en_cola(pdf_id, items)
 #|     return resumen
 #|
 #|
@@ -1917,11 +2088,11 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         grupos.setdefault((f["competencia_id"], f["tipo"], f["grado"]), []).append(f)
 #|     for (cid, tipo, clave), items in grupos.items():
 #|         if tipo == "desempeno":
-#|             execute("DELETE FROM curriculo_desempenos WHERE competencia_id=%s AND grado=%s", (cid, clave))
+#|             execute("DELETE FROM curriculo_desempenos WHERE competencia_id=%s AND grado=%s AND asignacion_id IS NULL", (cid, clave))
 #|             execute_many("INSERT INTO curriculo_desempenos (competencia_id, grado, texto, orden) VALUES (%s,%s,%s,%s)",
 #|                          [(cid, clave, x["texto"], i) for i, x in enumerate(items, 1)])
 #|         else:
-#|             execute("DELETE FROM curriculo_estandares WHERE competencia_id=%s AND ciclo=%s", (cid, clave))
+#|             execute("DELETE FROM curriculo_estandares WHERE competencia_id=%s AND ciclo=%s AND asignacion_id IS NULL", (cid, clave))
 #|             execute("INSERT INTO curriculo_estandares (competencia_id, ciclo, texto) VALUES (%s,%s,%s)",
 #|                     (cid, clave, items[0]["texto"]))
 #|     if marcar_verificada:
@@ -1936,6 +2107,243 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     if ids:
 #|         marcas = ",".join(["%s"] * len(ids))
 #|         execute(f"UPDATE curriculo_importado SET estado='rechazado' WHERE id IN ({marcas})", tuple(ids))
+#@@ END
+#@@ MODULE lineamientos
+#| """Lineamientos por curso: traerlos del MINEDU (con IA) o leer los que sube el docente (PDF / Word).
+#| Se guardan SOLO para ese curso (no cambian el currículo de los demás) y siempre se verifican contra el texto."""
+#| import io
+#| import re
+#|
+#| from curriculo import competencias_de
+#| from db import execute, execute_many, fetch
+#| from programas import (buscar_programas, descargar_y_leer, extraer_items, nivel_probable, paginas_guardadas,
+#|                        poner_en_cola)
+#| from repo import actualizar_asignacion
+#| from util import norm
+#|
+#|
+#| def paginas_de_archivo(nombre, datos: bytes):
+#|     """Convierte un PDF, Word o TXT en páginas [(n, texto, normalizado)]."""
+#|     bajo = nombre.lower()
+#|     if bajo.endswith(".pdf"):
+#|         from pypdf import PdfReader
+#|         lector = PdfReader(io.BytesIO(datos))
+#|         textos = [(p.extract_text() or "") for p in lector.pages]
+#|     elif bajo.endswith(".docx"):
+#|         from docx import Document
+#|         d = Document(io.BytesIO(datos))
+#|         lineas = [p.text for p in d.paragraphs if p.text.strip()]
+#|         for t in d.tables:
+#|             for fila in t.rows:
+#|                 lineas.append(" | ".join(c.text.strip() for c in fila.cells))
+#|         textos, actual = [], ""
+#|         for l in lineas:                         # páginas artificiales de ~3000 caracteres
+#|             if len(actual) + len(l) > 3000:
+#|                 textos.append(actual)
+#|                 actual = ""
+#|             actual += l + "\n"
+#|         textos.append(actual)
+#|     elif bajo.endswith(".txt"):
+#|         crudo = datos.decode("utf-8", errors="ignore")
+#|         textos = [crudo[i:i + 3000] for i in range(0, len(crudo), 3000)] or [""]
+#|     else:
+#|         raise RuntimeError("Solo se pueden leer archivos PDF, Word (.docx) o TXT.")
+#|     return [(i, t, norm(t)) for i, t in enumerate(textos, 1)]
+#|
+#|
+#| def _guardar_propios(asig, items, fuente):
+#|     """Guarda lo extraído como lineamientos propios del curso (reemplaza lo propio anterior de esas competencias)."""
+#|     aid = asig["id"]
+#|     for cid in {i[0] for i in items}:
+#|         execute("DELETE FROM curriculo_desempenos WHERE competencia_id=%s AND asignacion_id=%s", (cid, aid))
+#|         execute("DELETE FROM curriculo_estandares WHERE competencia_id=%s AND asignacion_id=%s", (cid, aid))
+#|     des = [(i[0], i[2], i[3], k, aid) for k, i in enumerate((x for x in items if x[1] == "desempeno"), 1)]
+#|     est = [(i[0], i[2], i[3], aid) for i in items if i[1] == "estandar"]
+#|     execute_many("INSERT INTO curriculo_desempenos (competencia_id, grado, texto, orden, asignacion_id) VALUES (%s,%s,%s,%s,%s)", des)
+#|     execute_many("INSERT INTO curriculo_estandares (competencia_id, ciclo, texto, asignacion_id) VALUES (%s,%s,%s,%s)", est)
+#|     actualizar_asignacion(aid, lineamientos_fuente=fuente[:300])
+#|     return len(des), len(est)
+#|
+#|
+#| def _trabajos(asig):
+#|     return [(asig["area"], c) for c in competencias_de(asig["nivel"], asig["area"])]
+#|
+#|
+#| def desde_archivo(asig, nombre, datos, progreso=None):
+#|     """El docente sube sus lineamientos: se lee, se extrae con IA y se verifica contra su propio archivo."""
+#|     paginas = paginas_de_archivo(nombre, datos)
+#|     items, resumen = extraer_items(paginas, asig["nivel"], _trabajos(asig), progreso)
+#|     if not items:
+#|         raise RuntimeError("No se encontraron desempeños en tu archivo para las competencias de este curso. "
+#|                            "Revisa que el archivo contenga los desempeños por grado.")
+#|     resumen["desempenos"], resumen["estandares"] = _guardar_propios(asig, items, f"Archivo propio: {nombre}")
+#|     return resumen
+#|
+#|
+#| def _pdf_del_nivel(nivel):
+#|     filas = fetch("SELECT * FROM curriculo_pdf WHERE estado IN ('leido','actualizado') AND paginas>0 "
+#|                   "AND nivel=%s ORDER BY (estado='leido') DESC, id DESC", (nivel,))
+#|     return filas[0] if filas else None
+#|
+#|
+#| def traer_oficial(asig, progreso=None):
+#|     """Busca el Programa Curricular oficial del nivel (si no está leído lo descarga) y trae los lineamientos del curso."""
+#|     pdf = _pdf_del_nivel(asig["nivel"])
+#|     if pdf is None:
+#|         if progreso:
+#|             progreso(0.05, "Buscando el Programa Curricular en gob.pe…")
+#|         lista, _ = buscar_programas()
+#|         cand = [p for p in lista if p["nivel"] == asig["nivel"] and p["estado"] != "descartado"]
+#|         if not cand:
+#|             raise RuntimeError("No encontré el Programa Curricular de tu nivel en las páginas oficiales. "
+#|                                "Pídele al administrador que lo cargue, o sube tus lineamientos en PDF o Word.")
+#|         if progreso:
+#|             progreso(0.1, "Descargando el PDF oficial (puede tardar)…")
+#|         pdf = cand[0]
+#|         descargar_y_leer(pdf["id"])
+#|     paginas = paginas_guardadas(pdf["id"])
+#|     items, resumen = extraer_items(paginas, asig["nivel"], _trabajos(asig),
+#|                                    (lambda f, t: progreso(0.2 + 0.8 * f, t)) if progreso else None)
+#|     if not items:
+#|         raise RuntimeError("No pude verificar desempeños de este curso en el PDF oficial. "
+#|                            "Puedes subir tus lineamientos en PDF o Word.")
+#|     poner_en_cola(pdf["id"], items)        # el administrador podrá aprobarlos para todos
+#|     resumen["desempenos"], resumen["estandares"] = _guardar_propios(asig, items, f"MINEDU (PDF oficial): {pdf['titulo'] or pdf['url']}")
+#|     return resumen
+#|
+#|
+#| def usar_oficial(asig):
+#|     """Vuelve a usar el currículo oficial del sistema (borra los lineamientos propios del curso)."""
+#|     execute("DELETE FROM curriculo_desempenos WHERE asignacion_id=%s", (asig["id"],))
+#|     execute("DELETE FROM curriculo_estandares WHERE asignacion_id=%s", (asig["id"],))
+#|     actualizar_asignacion(asig["id"], lineamientos_fuente="")
+#@@ END
+#@@ MODULE calendario
+#| """Calendario docente: eventos, programación automática de clases y sugerencias con IA."""
+#| import calendar
+#| import datetime as dt
+#| import re
+#|
+#| from db import execute, fetch
+#| from ia import pedir_json, preambulo
+#| from repo import contenido, get_doc, listar_docs
+#| from util import s
+#|
+#| TIPOS = {"clase": ("📖", "Clase"), "examen": ("📝", "Examen"), "actividad": ("🎯", "Actividad"),
+#|          "reunion": ("👥", "Reunión"), "otro": ("📌", "Otro")}
+#| DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+#| MESES = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Setiembre", "Octubre",
+#|          "Noviembre", "Diciembre"]
+#| AUTO = "[auto]"
+#|
+#|
+#| def eventos_mes(uid, año, mes, aid=None):
+#|     ini = dt.date(año, mes, 1)
+#|     fin = dt.date(año, mes, calendar.monthrange(año, mes)[1])
+#|     sql = "SELECT * FROM eventos WHERE usuario_id=%s AND fecha>=%s AND fecha<=%s"
+#|     params = [uid, ini, fin]
+#|     if aid:
+#|         sql += " AND (asignacion_id=%s OR asignacion_id IS NULL)"
+#|         params.append(aid)
+#|     return fetch(sql + " ORDER BY fecha, id", tuple(params))
+#|
+#|
+#| def agregar(uid, aid, fecha, tipo, titulo, detalle="", doc_id=None):
+#|     nuevo, _ = execute("INSERT INTO eventos (usuario_id, asignacion_id, fecha, tipo, titulo, detalle, doc_id) "
+#|                        "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+#|                        (uid, aid, fecha, tipo if tipo in TIPOS else "otro", titulo[:255], detalle, doc_id))
+#|     return nuevo
+#|
+#|
+#| def borrar(evento_id, uid):
+#|     execute("DELETE FROM eventos WHERE id=%s AND usuario_id=%s", (evento_id, uid))
+#|
+#|
+#| def parsear_fechas(texto):
+#|     """Lee fechas dd/mm/aaaa separadas por comas, espacios o saltos de línea. Devuelve (set de fechas, inválidas)."""
+#|     validas, invalidas = set(), []
+#|     for trozo in re.split(r"[,\n;]+", texto or ""):
+#|         trozo = trozo.strip()
+#|         if not trozo:
+#|             continue
+#|         try:
+#|             validas.add(dt.datetime.strptime(trozo, "%d/%m/%Y").date())
+#|         except ValueError:
+#|             invalidas.append(trozo)
+#|     return validas, invalidas
+#|
+#|
+#| def programar_clases(uid, asig, inicio, dias_semana, sin_clase=frozenset(), con_examen=True):
+#|     """Reparte las clases del sílabo (y un examen al final de cada unidad) en las fechas elegidas.
+#|     Reemplaza lo que se programó antes automáticamente para este curso. Devuelve cuántos eventos creó."""
+#|     if not dias_semana:
+#|         raise ValueError("Elige al menos un día de clase.")
+#|     aid = asig["id"]
+#|     anual = get_doc(aid, "anual")
+#|     unidades = (contenido(anual).get("unidades") if anual else None) or []
+#|     if not unidades:
+#|         raise ValueError("Primero crea tu sílabo anual.")
+#|     execute("DELETE FROM eventos WHERE usuario_id=%s AND asignacion_id=%s AND detalle LIKE %s", (uid, aid, AUTO + "%"))
+#|
+#|     fecha = [inicio]
+#|
+#|     def siguiente():
+#|         for _ in range(800):
+#|             d = fecha[0]
+#|             fecha[0] = d + dt.timedelta(days=1)
+#|             if d.weekday() in dias_semana and d not in sin_clase:
+#|                 return d
+#|         raise ValueError("No hay fechas disponibles con esos días.")
+#|
+#|     creados = 0
+#|     for ua in unidades:
+#|         udoc = get_doc(aid, "unidad", numero=ua["numero"])
+#|         sesiones = listar_docs(aid, "sesion", padre_id=udoc["id"]) if udoc else []
+#|         if sesiones:
+#|             clases = [(contenido(x).get("titulo") or x["titulo"], x["id"]) for x in sesiones]
+#|         else:
+#|             clases = [(t["titulo"], None) for t in ua.get("temas") or []]
+#|         for i, (titulo, doc_id) in enumerate(clases, 1):
+#|             agregar(uid, aid, siguiente(), "clase", f"U{ua['numero']} · Clase {i}: {titulo}", AUTO, doc_id)
+#|             creados += 1
+#|         if con_examen and clases:
+#|             agregar(uid, aid, siguiente(), "examen", f"Examen de la Unidad {ua['numero']}: {ua['titulo']}", AUTO)
+#|             creados += 1
+#|     return creados
+#|
+#|
+#| def sugerir_con_ia(asig, año, mes):
+#|     """La IA propone actividades pedagógicas del mes (no inventa feriados ni fechas oficiales)."""
+#|     ultimo = calendar.monthrange(año, mes)[1]
+#|     datos, _ = pedir_json(f"""{preambulo()}
+#| Propón entre 5 y 8 actividades pedagógicas para el mes de {MESES[mes]} de {año} de un docente de {asig['area']} ({asig['grado']}, {asig['nivel']}):
+#| evaluaciones, retroalimentación, proyectos, ferias, reuniones con familias, etc.
+#| NO inventes feriados, vacaciones ni fechas oficiales del Ministerio. Usa solo días de lunes a viernes del mes (del 1 al {ultimo}).
+#| Formato: {{"eventos":[{{"fecha":"{año}-{mes:02d}-10","tipo":"actividad","titulo":"...","detalle":"..."}}]}}
+#| Tipos permitidos: actividad, examen, reunion.""")
+#|     res = []
+#|     for x in (datos.get("eventos") if isinstance(datos, dict) else datos) or []:
+#|         try:
+#|             f = dt.datetime.strptime(s(x.get("fecha")), "%Y-%m-%d").date()
+#|         except (ValueError, AttributeError):
+#|             continue
+#|         if f.year == año and f.month == mes and s(x.get("titulo")):
+#|             res.append({"fecha": f, "tipo": x.get("tipo") if x.get("tipo") in TIPOS else "actividad",
+#|                         "titulo": s(x.get("titulo")), "detalle": s(x.get("detalle"))})
+#|     return res
+#|
+#|
+#| def a_ics(eventos):
+#|     """Archivo .ics para importar a Google Calendar u Outlook."""
+#|     esc = lambda t: s(t).replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+#|     lineas = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//EduPeru IA//ES"]
+#|     for e in eventos:
+#|         f = e["fecha"]
+#|         lineas += ["BEGIN:VEVENT", f"UID:eduperu-{e['id']}@eduperu", f"DTSTART;VALUE=DATE:{f:%Y%m%d}",
+#|                    f"SUMMARY:{esc(e['titulo'])}", f"DESCRIPTION:{esc((e.get('detalle') or '').replace(AUTO, '').strip())}",
+#|                    "END:VEVENT"]
+#|     lineas.append("END:VCALENDAR")
+#|     return ("\r\n".join(lineas) + "\r\n").encode("utf-8")
 #@@ END
 #@@ MODULE auth
 #| """Inicio de sesión, registro y contraseñas."""
@@ -2041,13 +2449,14 @@ elif pagina == PAG_ADMIN and es_admin:
 #| from render import COLORES, COLOR_DEFECTO, ICONO_COLOR, a_docx, a_html
 #| from exportar import bloques_de
 #|
-#| PAG_PANEL = "🏠 Mi Panel"
-#| PAG_ANUAL = "📅 Planificación anual"
-#| PAG_UNIDADES = "📚 Unidades"
-#| PAG_SESIONES = "📝 Sesiones"
-#| PAG_BIBLIO = "🗂️ Mi Biblioteca"
+#| PAG_PANEL = "🏠 Inicio"
+#| PAG_ANUAL = "📅 Sílabo anual"
+#| PAG_TEMAS = "🎯 Temas y clases"
+#| PAG_CALENDARIO = "🗓️ Calendario"
 #| PAG_CURRICULO = "📖 Currículo oficial"
+#| PAG_BIBLIO = "🗂️ Mi biblioteca"
 #| PAG_ADMIN = "⚙️ Administración"
+#| PAG_UNIDADES = PAG_SESIONES = PAG_TEMAS   # nombres antiguos: ahora todo vive en «Temas y clases»
 #|
 #| MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 #|
@@ -2068,7 +2477,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| def abrir_siguiente(aid):
 #|     """Activa el área y te lleva al siguiente paso pendiente (anual → unidades → sesiones)."""
 #|     r = resumen_asignacion(aid)
-#|     pagina = PAG_ANUAL if not r.get("anual") else PAG_UNIDADES if not r.get("unidad") else PAG_SESIONES
+#|     pagina = PAG_ANUAL if not r.get("anual") else PAG_TEMAS
 #|     abrir_area(aid, pagina)
 #|
 #|
@@ -2094,8 +2503,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #| def exigir_area():
 #|     asig = area_activa()
 #|     if not asig:
-#|         st.warning("👆 Primero elige o crea un **área** en *Mi Panel*. Ahí indicas tu grado, área y sección.")
-#|         st.button("Ir a Mi Panel", on_click=ir_a, args=(PAG_PANEL,))
+#|         st.warning("👆 Primero elige o crea un **curso** en *Inicio*. Ahí indicas tu grado, área y sección.")
+#|         st.button("Ir a Inicio", on_click=ir_a, args=(PAG_PANEL,))
 #|         st.stop()
 #|     return asig
 #|
@@ -2520,27 +2929,192 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         rechazar([int(r["id"]) for _, r in ed.iterrows() if not r["aprobar"]])
 #|         st.rerun()
 #@@ END
+#@@ MODULE v_calendario
+#| """Calendario: vista mensual, eventos, programación automática y sugerencias con IA."""
+#| import calendar
+#| import datetime as dt
+#| import html
+#|
+#| import streamlit as st
+#|
+#| from calendario import (AUTO, DIAS, MESES, TIPOS, a_ics, agregar, borrar, eventos_mes, parsear_fechas,
+#|                         programar_clases, sugerir_con_ia)
+#| from repo import cobrar
+#| from ui import area_activa, confirmar, flash
+#|
+#|
+#| def _mover(delta):
+#|     y, m = st.session_state["cal_y"], st.session_state["cal_m"] + delta
+#|     if m < 1:
+#|         y, m = y - 1, 12
+#|     elif m > 12:
+#|         y, m = y + 1, 1
+#|     st.session_state["cal_y"], st.session_state["cal_m"] = y, m
+#|
+#|
+#| def _hoy_cb():
+#|     hoy = dt.date.today()
+#|     st.session_state["cal_y"], st.session_state["cal_m"] = hoy.year, hoy.month
+#|
+#|
+#| def render():
+#|     uid = st.session_state.user_id
+#|     asig = area_activa()
+#|     hoy = dt.date.today()
+#|     st.session_state.setdefault("cal_y", hoy.year)
+#|     st.session_state.setdefault("cal_m", hoy.month)
+#|     y, m = st.session_state["cal_y"], st.session_state["cal_m"]
+#|
+#|     st.title("🗓️ Calendario")
+#|     st.info("💡 Programa tus clases, exámenes y actividades. Puedes repartir automáticamente las clases de tu sílabo "
+#|             "y pedir sugerencias a la IA.")
+#|
+#|     c1, c2, c3, c4 = st.columns([1, 3, 1, 2])
+#|     c1.button("◀ Anterior", on_click=_mover, args=(-1,), key="cal_prev", use_container_width=True)
+#|     c2.markdown(f"<h3 style='text-align:center;margin:0'>{MESES[m]} {y}</h3>", unsafe_allow_html=True)
+#|     c3.button("Siguiente ▶", on_click=_mover, args=(1,), key="cal_next", use_container_width=True)
+#|     c4.button("Ir a hoy", on_click=_hoy_cb, key="cal_hoy", use_container_width=True)
+#|
+#|     solo_curso = False
+#|     if asig:
+#|         solo_curso = st.radio("Mostrar", ["Todos mis cursos", f"Solo {asig['area']} · {asig['grado']}"], horizontal=True,
+#|                               key="cal_filtro", label_visibility="collapsed").startswith("Solo")
+#|     eventos = eventos_mes(uid, y, m, asig["id"] if solo_curso and asig else None)
+#|     por_dia = {}
+#|     for e in eventos:
+#|         por_dia.setdefault(e["fecha"].day, []).append(e)
+#|
+#|     cab = st.columns(7)
+#|     for i, nombre in enumerate(DIAS):
+#|         cab[i].markdown(f"<div style='text-align:center;font-weight:600;color:#6D28D9'>{nombre[:3]}</div>",
+#|                         unsafe_allow_html=True)
+#|     for semana in calendar.Calendar(firstweekday=0).monthdayscalendar(y, m):
+#|         cols = st.columns(7)
+#|         for i, dia in enumerate(semana):
+#|             if dia == 0:
+#|                 continue
+#|             es_hoy = dt.date(y, m, dia) == hoy
+#|             borde = "#7c3aed" if es_hoy else "#eee"
+#|             fondo = "#faf5ff" if es_hoy else "#fff"
+#|             items = "".join(
+#|                 f"<div style='font-size:11px;line-height:1.25;margin-top:2px'>{TIPOS.get(e['tipo'], TIPOS['otro'])[0]} "
+#|                 f"{html.escape((e['titulo'] or '')[:28])}</div>" for e in por_dia.get(dia, [])[:3])
+#|             mas = len(por_dia.get(dia, [])) - 3
+#|             if mas > 0:
+#|                 items += f"<div style='font-size:11px;color:#888'>+{mas} más</div>"
+#|             cols[i].markdown(f"<div style='min-height:82px;border:1px solid {borde};background:{fondo};"
+#|                              f"border-radius:10px;padding:4px 6px'><b>{dia}</b>{items}</div>", unsafe_allow_html=True)
+#|
+#|     st.markdown("#### 📋 Eventos de este mes")
+#|     if not eventos:
+#|         st.caption("No hay eventos este mes.")
+#|     for e in eventos:
+#|         a, b = st.columns([8, 1])
+#|         emoji, nombre = TIPOS.get(e["tipo"], TIPOS["otro"])
+#|         a.markdown(f"**{e['fecha']:%d/%m}** · {emoji} {e['titulo']}")
+#|         if e.get("detalle") and not e["detalle"].startswith(AUTO):
+#|             a.caption(e["detalle"])
+#|         if b.button("✕", key=f"ev_del_{e['id']}", help="Eliminar este evento"):
+#|             borrar(e["id"], uid)
+#|             st.rerun()
+#|     if eventos:
+#|         st.download_button("⬇️ Descargar calendario (.ics)", data=a_ics(eventos), file_name=f"calendario_{y}_{m:02d}.ics",
+#|                            mime="text/calendar", key="cal_ics")
+#|
+#|     with st.expander("➕ Agregar un evento"):
+#|         with st.form("cal_nuevo", clear_on_submit=True):
+#|             f1, f2 = st.columns(2)
+#|             fecha = f1.date_input("Fecha", value=dt.date(y, m, 1) if (y, m) != (hoy.year, hoy.month) else hoy)
+#|             tipo = f2.selectbox("Tipo", list(TIPOS), format_func=lambda k: f"{TIPOS[k][0]} {TIPOS[k][1]}")
+#|             titulo = st.text_input("Título")
+#|             detalle = st.text_area("Detalle (opcional)", height=70)
+#|             vincular = st.checkbox("Asociarlo al curso activo", value=bool(asig), disabled=not asig)
+#|             ok = st.form_submit_button("Agregar", type="primary")
+#|         if ok:
+#|             if not titulo.strip():
+#|                 st.warning("Escribe un título.")
+#|             else:
+#|                 agregar(uid, asig["id"] if asig and vincular else None, fecha, tipo, titulo.strip(), detalle.strip())
+#|                 flash("Evento agregado ✅")
+#|                 st.rerun()
+#|
+#|     with st.expander("⚡ Programar mis clases automáticamente"):
+#|         if not asig:
+#|             st.info("Primero elige un curso en el menú lateral.")
+#|         else:
+#|             st.caption("Reparte las clases de tu sílabo en los días que elijas y pone un examen al final de cada unidad. "
+#|                        "Lo programado antes automáticamente para este curso se reemplaza.")
+#|             d1, d2 = st.columns(2)
+#|             inicio = d1.date_input("Primer día de clases", value=hoy, key="cal_inicio")
+#|             dias = d2.multiselect("Días de clase", DIAS, default=["Lunes", "Miércoles", "Viernes"], key="cal_dias")
+#|             sin = st.text_area("Días sin clases (opcional): fechas dd/mm/aaaa separadas por comas", height=70, key="cal_sin",
+#|                                help="Feriados, vacaciones, semana de gestión… según el calendario de tu institución.")
+#|             con_ex = st.checkbox("Incluir un examen al final de cada unidad", value=True, key="cal_conex")
+#|             if st.button("📆 Programar clases", type="primary", key="cal_programar"):
+#|                 fechas, malas = parsear_fechas(sin)
+#|                 if malas:
+#|                     st.warning("No entendí estas fechas (úsalas como dd/mm/aaaa): " + ", ".join(malas))
+#|                 try:
+#|                     n = programar_clases(uid, asig, inicio, [DIAS.index(x) for x in dias], fechas, con_ex)
+#|                     flash(f"Se programaron {n} eventos. Revisa los meses siguientes ✅")
+#|                     st.session_state["cal_y"], st.session_state["cal_m"] = inicio.year, inicio.month
+#|                     st.rerun()
+#|                 except ValueError as e:
+#|                     st.error(str(e))
+#|
+#|     with st.expander("🤖 Sugerencias de actividades con IA"):
+#|         if not asig:
+#|             st.info("Primero elige un curso en el menú lateral.")
+#|         else:
+#|             st.caption(f"La IA propone actividades pedagógicas para {MESES[m]} {y}. No conoce los feriados ni fechas oficiales: "
+#|                        "verifica siempre con el calendario de tu institución (RM N.° 501-2025-MINEDU).")
+#|             if confirmar("calendario_ia", f"✨ Sugerir actividades de {MESES[m]}", "cal_ia", asig=None):
+#|                 try:
+#|                     with st.spinner("Pensando actividades..."):
+#|                         st.session_state["cal_sug"] = sugerir_con_ia(asig, y, m)
+#|                     cobrar(uid, "calendario_ia")
+#|                 except Exception as e:
+#|                     st.error(f"No se pudo: {e}")
+#|             sug = st.session_state.get("cal_sug") or []
+#|             marcados = []
+#|             for i, x in enumerate(sug):
+#|                 if st.checkbox(f"{x['fecha']:%d/%m} · {TIPOS[x['tipo']][0]} {x['titulo']}", value=True, key=f"cal_s_{i}"):
+#|                     marcados.append(x)
+#|                 if x["detalle"]:
+#|                     st.caption(x["detalle"])
+#|             if sug and st.button("➕ Agregar los marcados", key="cal_sug_add"):
+#|                 for x in marcados:
+#|                     agregar(uid, asig["id"], x["fecha"], x["tipo"], x["titulo"], x["detalle"])
+#|                 st.session_state["cal_sug"] = []
+#|                 flash(f"Se agregaron {len(marcados)} actividades ✅")
+#|                 st.rerun()
+#@@ END
 #@@ MODULE v_panel
-#| """Mi Panel: áreas asignadas del docente y guía rápida."""
+#| """Inicio: bienvenida, Mis cursos (crear arriba, eliminar de a uno o todos) y herramientas."""
+#| import html
+#|
 #| import streamlit as st
 #|
 #| from curriculo import GRADOS, NIVELES, REGIONES, areas_de, estado_area
-#| from repo import borrar_asignacion, crear_asignacion, get_usuario, listar_asignaciones, resumen_asignacion
-#| from ui import PAG_ANUAL, abrir_area, abrir_siguiente, flash
+#| from repo import (borrar_asignacion, borrar_todas_asignaciones, crear_asignacion, get_usuario, listar_asignaciones,
+#|                   resumen_asignacion)
+#| from ui import PAG_ANUAL, PAG_BIBLIO, PAG_CALENDARIO, PAG_CURRICULO, PAG_TEMAS, abrir_siguiente, flash
+#|
+#| CLASE, UNIDAD = "📖 Una clase (un tema)", "📚 Toda la unidad"
+#| HERRAMIENTAS = [
+#|     ("📅", "Sílabo anual", "Crea tu sílabo con los lineamientos del Estado", PAG_ANUAL, None),
+#|     ("📚", "Unidad de aprendizaje", "Diseña una unidad completa con su secuencia", PAG_TEMAS, UNIDAD),
+#|     ("📝", "Sesión de aprendizaje", "Elige un tema y crea su sesión", PAG_TEMAS, CLASE),
+#|     ("🏆", "Fichas y desafíos", "Desglosa un tema en fichas y retos para tus alumnos", PAG_TEMAS, CLASE),
+#|     ("📋", "Exámenes y rúbricas", "Por clase, por unidad o bimestral", PAG_TEMAS, UNIDAD),
+#|     ("🗓️", "Calendario", "Programa clases, exámenes y actividades", PAG_CALENDARIO, None),
+#|     ("📖", "Currículo oficial", "Consulta los lineamientos del MINEDU por curso", PAG_CURRICULO, None),
+#|     ("🗂️", "Mi biblioteca", "Todos tus documentos en un solo lugar", PAG_BIBLIO, None),
+#| ]
 #|
 #|
-#| def _pasos(aid):
-#|     r = resumen_asignacion(aid)
-#|     marca = lambda ok: "✅" if ok else "⬜"
-#|     c1, c2, c3, c4 = st.columns(4)
-#|     c1.markdown(f"**1. Tu área** ✅\n\nYa la creaste")
-#|     c2.markdown(f"**2. Planificación anual** {marca(r.get('anual'))}\n\nSituaciones y unidades")
-#|     c3.markdown(f"**3. Unidades** {marca(r.get('unidad'))}\n\n{r.get('unidad', 0)} creadas")
-#|     c4.markdown(f"**4. Sesiones y materiales** {marca(r.get('sesion'))}\n\n{r.get('sesion', 0)} sesiones")
-#|
-#|
-#| def _crear_area_cb(uid):
-#|     """Se ejecuta ANTES de redibujar la página (así se puede cambiar el área activa sin errores)."""
+#| # ---------------- callbacks (se ejecutan antes de redibujar: así pueden cambiar el curso activo) ----------------
+#| def _crear_curso_cb(uid):
 #|     ss = st.session_state
 #|     if not ss.get("na_area"):
 #|         flash("No hay áreas para este nivel. Pide al administrador que cargue el currículo.", "error")
@@ -2552,102 +3126,143 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                                    "nivel": ss["na_nivel"], "grado": ss["na_grado"], "area": ss["na_area"],
 #|                                    "seccion": (ss.get("na_seccion") or "").strip()})
 #|     ss["area_id"] = nuevo
-#|     flash(f"¡Listo! Creaste {ss['na_area']} · {ss['na_grado']}. Sigue con la planificación anual.")
+#|     flash(f"¡Listo! Creaste {ss['na_area']} · {ss['na_grado']}. Empieza por el sílabo anual.")
 #|
 #|
-#| def _borrar_area_cb():
-#|     ss = st.session_state
-#|     if not ss.get("del_area_ok"):
-#|         flash("Marca la casilla para confirmar que quieres eliminarla.", "warning")
-#|         return
-#|     elegida = ss.get("del_area_sel")
-#|     borrar_asignacion(elegida)
-#|     if ss.get("area_id") == elegida:
-#|         ss["area_id"] = None
-#|     ss["del_area_ok"] = False
-#|     flash("Área eliminada.")
+#| def _pedir_borrar(aid):
+#|     st.session_state[f"_del_{aid}"] = True
 #|
 #|
+#| def _cancelar_borrar(aid):
+#|     st.session_state.pop(f"_del_{aid}", None)
+#|
+#|
+#| def _borrar_curso_cb(aid):
+#|     borrar_asignacion(aid)
+#|     st.session_state.pop(f"_del_{aid}", None)
+#|     if st.session_state.get("area_id") == aid:
+#|         st.session_state["area_id"] = None
+#|     flash("Curso eliminado.")
+#|
+#|
+#| def _pedir_borrar_todos():
+#|     st.session_state["_del_todos"] = True
+#|
+#|
+#| def _cancelar_borrar_todos():
+#|     st.session_state.pop("_del_todos", None)
+#|
+#|
+#| def _borrar_todos_cb(uid):
+#|     borrar_todas_asignaciones(uid)
+#|     st.session_state.pop("_del_todos", None)
+#|     st.session_state["area_id"] = None
+#|     flash("Se eliminaron todos tus cursos.")
+#|
+#|
+#| def _ir_herramienta(pagina, ambito):
+#|     st.session_state["nav"] = pagina
+#|     if ambito:
+#|         st.session_state["tc_ambito"] = ambito
+#|
+#|
+#| # ---------------- pantalla ----------------
 #| def render():
 #|     uid = st.session_state.user_id
 #|     u = get_usuario(uid)
-#|     st.title(f"👋 ¡Hola, {u['nombre'].split()[0]}!")
-#|     st.caption("Aquí empiezas. Crea tus áreas (el curso que enseñas) y sigue los pasos: Anual → Unidades → Sesiones.")
-#|
 #|     asigs = listar_asignaciones(uid)
+#|     nombre = html.escape(u["nombre"].split()[0])
+#|     creditos = "ilimitados" if u["rol"] == "admin" else u["creditos"]
+#|     st.markdown(f"""<div class="hero"><div class="hero-t">¡Hola, {nombre}! 👋</div>
+#| <div class="hero-s">Crea tu sílabo, tus clases, fichas, desafíos y exámenes en minutos, alineados al CNEB y a la RM N.° 501-2025-MINEDU.</div>
+#| <span class="chip">🎟️ Créditos: {creditos}</span></div>""", unsafe_allow_html=True)
 #|
-#|     if not asigs:
-#|         st.info("💡 **Empieza aquí:** crea tu primera área abajo. Solo toma un minuto y luego todo se llena solo.")
-#|     else:
-#|         activa = st.session_state.get("area_id")
-#|         if activa:
-#|             actual = next((a for a in asigs if a["id"] == activa), None)
-#|             if actual:
-#|                 st.subheader(f"Tu ruta en: {actual['area']} · {actual['grado']}")
-#|                 _pasos(actual["id"])
-#|                 st.button("Continuar con la planificación anual →", on_click=abrir_area,
-#|                           args=(actual["id"], PAG_ANUAL), type="primary")
-#|                 st.divider()
+#|     # ---------- MIS CURSOS ----------
+#|     h1, h2 = st.columns([6, 1])
+#|     h1.subheader("📚 Mis cursos")
+#|     if asigs:
+#|         h2.button("🗑️", key="del_todos_btn", on_click=_pedir_borrar_todos, help="Eliminar TODOS mis cursos")
+#|     if st.session_state.get("_del_todos"):
+#|         st.warning("⚠️ ¿Eliminar **todos** tus cursos y todos sus documentos? No se puede deshacer.")
+#|         y, n, _ = st.columns([2, 1, 3])
+#|         y.button("Sí, eliminar todos", key="del_todos_si", on_click=_borrar_todos_cb, args=(uid,), type="primary")
+#|         n.button("No", key="del_todos_no", on_click=_cancelar_borrar_todos)
 #|
-#|         st.subheader("📌 Mis áreas asignadas")
-#|         for nivel in NIVELES:
-#|             grupo = [a for a in asigs if a["nivel"] == nivel]
-#|             if not grupo:
-#|                 continue
-#|             st.markdown(f"##### {nivel}")
-#|             cols = st.columns(3)
-#|             for i, a in enumerate(grupo):
-#|                 with cols[i % 3]:
-#|                     with st.container(border=True):
-#|                         st.markdown(f"**{a['area']}**")
-#|                         st.caption(f"{a['grado']} · Sección {a['seccion'] or '—'} · {a['ciclo_escolar']}")
-#|                         r = resumen_asignacion(a["id"])
-#|                         st.caption(f"📅 {'✅' if r.get('anual') else '⬜'}  📚 {r.get('unidad', 0)}  📝 {r.get('sesion', 0)}")
-#|                         st.button("Abrir ▶", key=f"abrir_{a['id']}", on_click=abrir_siguiente, args=(a["id"],),
-#|                                   use_container_width=True, type="primary")
-#|
-#|     with st.expander("➕ Nueva área", expanded=not asigs):
+#|     with st.expander("➕ Crear curso", expanded=not asigs):
 #|         st.caption("Estos datos aparecerán en todos tus documentos (los puedes cambiar después).")
 #|         c1, c2 = st.columns(2)
 #|         nivel = c1.selectbox("Nivel", NIVELES, index=1, key="na_nivel")
 #|         grado = c2.selectbox("Grado / edad", GRADOS[nivel], key="na_grado")
 #|         areas = areas_de(nivel)
 #|         area = c1.selectbox("Área curricular", areas, key="na_area") if areas else None
-#|         seccion = c2.text_input("Sección (ej.: A)", key="na_seccion")
+#|         c2.text_input("Sección (ej.: A)", key="na_seccion")
 #|         inst_def = u["colegio"] if u["colegio"] and u["colegio"] != "Independiente" else ""
-#|         inst = c1.text_input("Institución educativa", value=inst_def, key="na_inst")
-#|         director = c2.text_input("Nombre del director(a)", key="na_dir")
-#|         docente = c1.text_input("Nombre del docente", value=u["nombre"], key="na_doc")
-#|         region = c2.selectbox("Región", REGIONES, index=REGIONES.index("Lima"), key="na_region")
-#|         ciclo = c1.number_input("Año escolar", 2024, 2035, 2026, key="na_ciclo")
+#|         c1.text_input("Institución educativa", value=inst_def, key="na_inst")
+#|         c2.text_input("Nombre del director(a)", key="na_dir")
+#|         c1.text_input("Nombre del docente", value=u["nombre"], key="na_doc")
+#|         c2.selectbox("Región", REGIONES, index=REGIONES.index("Lima"), key="na_region")
+#|         c1.number_input("Año escolar", 2024, 2035, 2026, key="na_ciclo")
 #|         if area:
-#|             n_comp, n_ver, n_des = estado_area(nivel, area, grado)
+#|             _, _, n_des = estado_area(nivel, area, grado)
 #|             if n_des == 0:
-#|                 st.caption("ℹ️ Para este grado aún no hay desempeños cargados: la IA propondrá algunos "
-#|                            "y los verás marcados como «por verificar».")
-#|         st.button("✅ Crear área", type="primary", key="na_crear", on_click=_crear_area_cb, args=(uid,))
+#|                 st.caption("ℹ️ Para este grado aún no hay desempeños oficiales cargados. Después podrás traerlos del MINEDU con IA "
+#|                            "o subir tus propios lineamientos en el paso «Lineamientos» del sílabo.")
+#|         st.button("✅ Crear curso", type="primary", key="na_crear", on_click=_crear_curso_cb, args=(uid,))
 #|
-#|     if asigs:
-#|         with st.expander("🗑️ Eliminar un área"):
-#|             st.caption("Se borran también todos los documentos de esa área.")
-#|             ids = [a["id"] for a in asigs]
-#|             elegida = st.selectbox("Área", ids, key="del_area_sel",
-#|                                    format_func=lambda i: next(f"{a['area']} · {a['grado']} · {a['seccion'] or '—'}"
-#|                                                               for a in asigs if a["id"] == i))
-#|             st.checkbox("Sí, quiero eliminarla", key="del_area_ok")
-#|             st.button("Eliminar área", key="del_area_btn", on_click=_borrar_area_cb)
+#|     if not asigs:
+#|         st.info("💡 **Empieza aquí:** crea tu primer curso (solo toma un minuto) y luego sigue con el sílabo anual.")
+#|     activa = st.session_state.get("area_id")
+#|     for nivel in NIVELES:
+#|         grupo = [a for a in asigs if a["nivel"] == nivel]
+#|         if not grupo:
+#|             continue
+#|         st.markdown(f"##### {nivel}")
+#|         cols = st.columns(3)
+#|         for i, a in enumerate(grupo):
+#|             with cols[i % 3]:
+#|                 with st.container(border=True):
+#|                     t1, t2 = st.columns([5, 1])
+#|                     t1.markdown(f"**{a['area']}**" + ("  🟣" if a["id"] == activa else ""))
+#|                     t2.button("✕", key=f"x_{a['id']}", on_click=_pedir_borrar, args=(a["id"],), help="Eliminar este curso")
+#|                     st.caption(f"{a['grado']} · Sección {a['seccion'] or '—'} · {a['ciclo_escolar']}")
+#|                     if st.session_state.get(f"_del_{a['id']}"):
+#|                         st.warning(f"¿Eliminar «{a['area']}»? Se borran sus documentos.")
+#|                         y, n = st.columns(2)
+#|                         y.button("Sí", key=f"xy_{a['id']}", on_click=_borrar_curso_cb, args=(a["id"],), type="primary",
+#|                                  use_container_width=True)
+#|                         n.button("No", key=f"xn_{a['id']}", on_click=_cancelar_borrar, args=(a["id"],),
+#|                                  use_container_width=True)
+#|                     else:
+#|                         r = resumen_asignacion(a["id"])
+#|                         st.caption(f"📅 {'✅' if r.get('anual') else '⬜'}  📚 {r.get('unidad', 0)}  📝 {r.get('sesion', 0)}")
+#|                         st.button("Abrir ▶", key=f"abrir_{a['id']}", on_click=abrir_siguiente, args=(a["id"],),
+#|                                   use_container_width=True, type="primary")
+#|
+#|     # ---------- HERRAMIENTAS ----------
+#|     st.subheader("🛠️ Herramientas")
+#|     st.caption("Todo lo que puedes crear con IA. Elige una para empezar.")
+#|     for fila in range(0, len(HERRAMIENTAS), 4):
+#|         cols = st.columns(4)
+#|         for col, (icono, titulo, desc, pagina, ambito) in zip(cols, HERRAMIENTAS[fila:fila + 4]):
+#|             with col:
+#|                 with st.container(border=True):
+#|                     st.markdown(f"<div class='tool-i'>{icono}</div><div class='tool-t'>{titulo}</div>"
+#|                                 f"<div class='tool-d'>{desc}</div>", unsafe_allow_html=True)
+#|                     st.button("Abrir", key=f"tool_{titulo}", on_click=_ir_herramienta, args=(pagina, ambito),
+#|                               use_container_width=True)
 #@@ END
 #@@ MODULE v_anual
-#| """Planificación anual: datos informativos, caracterización, competencias, situaciones significativas y unidades."""
+#| """Sílabo anual: datos, lineamientos del Estado, caracterización, competencias, unidades y temas (clases)."""
 #| import streamlit as st
 #|
-#| from curriculo import ciclo_de, competencias_de
+#| from curriculo import buscar_competencia, ciclo_de, competencias_de, contexto_curricular, estado_area
 #| from ia import generar_texto, pedir_json, preambulo
+#| from lineamientos import desde_archivo, traer_oficial, usar_oficial
 #| from normativa import normativa_vigente
-#| from repo import actualizar_asignacion, contenido, cobrar, get_doc, guardar_doc
-#| from ui import (PAG_UNIDADES, campo_linea, campo_multi, campo_num, campo_texto, confirmar, exigir_area, flash,
-#|                 ir_a, siguiente_version, vista_previa_y_descarga)
-#| from util import entero, norm, s
+#| from repo import actualizar_asignacion, cobrar, contenido, get_doc, guardar_doc
+#| from ui import (PAG_TEMAS, campo_linea, campo_multi, campo_num, campo_texto, confirmar, exigir_area, flash, ir_a,
+#|                 siguiente_version, vista_previa_y_descarga)
+#| from util import a_lista, entero, norm, s
 #|
 #|
 #| def _generar_caracterizacion(asig, notas):
@@ -2661,24 +3276,43 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     return s(texto)
 #|
 #|
-#| def _generar_unidades(asig, comps_sel, n):
-#|     ctx = "\n".join(f"- {c['nombre']} (capacidades: {'; '.join(c['capacidades'])})" for c in comps_sel)
+#| def _normalizar_temas(lista, mapa, comp_unidad):
+#|     temas = []
+#|     for x in lista or []:
+#|         if isinstance(x, str):
+#|             x = {"titulo": x}
+#|         if not isinstance(x, dict) or not s(x.get("titulo")):
+#|             continue
+#|         nombre = buscar_competencia(x.get("competencia"), mapa) or comp_unidad
+#|         info = mapa.get(nombre)
+#|         n = entero(x.get("desempeno"), 0)
+#|         texto = info["des"][n - 1]["texto"] if info and 1 <= n <= len(info["des"]) else ""
+#|         temas.append({"titulo": s(x.get("titulo")), "competencia": nombre, "desempeno_texto": texto})
+#|     return temas
+#|
+#|
+#| def _generar_unidades(asig, comps_sel, n, spw):
+#|     nombres = [c["nombre"] for c in comps_sel]
+#|     ctx, mapa = contexto_curricular(asig["nivel"], asig["area"], asig["grado"], nombres, asig["id"])
 #|     prompt = f"""{preambulo()}
-#| Elabora las SITUACIONES SIGNIFICATIVAS de la PLANIFICACIÓN ANUAL {asig['ciclo_escolar']} con {n} unidades de aprendizaje.
+#| Elabora el SÍLABO ANUAL {asig['ciclo_escolar']} con {n} unidades de aprendizaje y los temas (clases) de cada una.
 #| Datos: nivel {asig['nivel']}, grado {asig['grado']}, área {asig['area']}, región {asig['region']}, institución {asig['institucion'] or 'no indicada'}.
 #| Caracterización de los estudiantes: {asig.get('caracterizacion') or 'no especificada'}
-#| Competencias del área (usa SOLO estos nombres, escritos EXACTAMENTE igual):
+#|
+#| Lineamientos oficiales del curso (usa SOLO estos nombres de competencia, EXACTOS; D1, D2... son desempeños oficiales por competencia y NO se reescriben):
 #| {ctx}
 #|
 #| Para cada unidad entrega:
 #| - "titulo": título corto y motivador.
 #| - "problema": problema identificado del contexto (1 a 2 oraciones).
-#| - "situacion": situación significativa contextualizada a {asig['region']} (4 a 6 oraciones) que plantee un reto y termine con preguntas retadoras.
-#| - "valores": valores observables (2 a 3, separados por coma) tomados de los enfoques transversales del CNEB.
-#| - "competencias": lista de 1 a 3 nombres EXACTOS de la lista anterior. Entre todas las unidades deben quedar cubiertas todas las competencias.
+#| - "situacion": situación significativa contextualizada a {asig['region']} (4 a 6 oraciones) con un reto y preguntas retadoras.
+#| - "valores": valores observables (2 a 3, separados por coma) de los enfoques transversales del CNEB.
+#| - "competencias": 1 a 3 nombres EXACTOS de la lista. Entre todas las unidades deben cubrirse todas las competencias.
 #| - "semanas": número entre 3 y 5.
+#| - "temas": lista de clases de la unidad, EXACTAMENTE semanas × {spw} temas. Cada tema: {{"titulo": "tema concreto de la clase", "competencia": nombre EXACTO, "desempeno": número del D que desarrolla}}.
+#| Los temas deben avanzar de lo simple a lo complejo y cubrir los desempeños de las competencias de la unidad.
 #|
-#| Formato: {{"unidades":[{{"numero":1,"titulo":"...","problema":"...","situacion":"...","valores":"...","competencias":["..."],"semanas":4}}]}}"""
+#| Formato: {{"unidades":[{{"numero":1,"titulo":"...","problema":"...","situacion":"...","valores":"...","competencias":["..."],"semanas":4,"temas":[{{"titulo":"...","competencia":"...","desempeno":1}}]}}]}}"""
 #|     datos, _ = pedir_json(prompt)
 #|     lista = datos.get("unidades") if isinstance(datos, dict) else datos
 #|     if not isinstance(lista, list) or not lista:
@@ -2697,30 +3331,80 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         caps = [cap for c in comps_sel if c["nombre"] in elegidas for cap in c["capacidades"]]
 #|         unidades.append({"numero": i, "titulo": s(u.get("titulo")) or f"Unidad {i}", "problema": s(u.get("problema")),
 #|                          "situacion": s(u.get("situacion")), "valores": s(u.get("valores")),
-#|                          "competencias": elegidas, "capacidades": caps,
-#|                          "semanas": entero(u.get("semanas"), 4, 1, 12)})
+#|                          "competencias": elegidas, "capacidades": caps, "semanas": entero(u.get("semanas"), 4, 1, 12),
+#|                          "temas": _normalizar_temas(u.get("temas"), mapa, elegidas[0])})
 #|     return unidades
 #|
 #|
 #| def _vacia(i, comps_sel):
-#|     nombre = comps_sel[(i - 1) % len(comps_sel)]
+#|     c = comps_sel[(i - 1) % len(comps_sel)]
 #|     return {"numero": i, "titulo": f"Unidad {i}", "problema": "", "situacion": "", "valores": "",
-#|             "competencias": [nombre["nombre"]], "capacidades": list(nombre["capacidades"]), "semanas": 4}
+#|             "competencias": [c["nombre"]], "capacidades": list(c["capacidades"]), "semanas": 4, "temas": []}
+#|
+#|
+#| # ------------------------------------------------------------------
+#| def _paso_lineamientos(asig, ver_key):
+#|     aid, uid = asig["id"], st.session_state.user_id
+#|     propio = asig.get("lineamientos_fuente") or ""
+#|     n_comp, n_ver, n_des = estado_area(asig["nivel"], asig["area"], asig["grado"], aid)
+#|     st.markdown("**¿Con qué lineamientos armamos tu sílabo?**  Siempre son textos del Estado, nunca inventados por la IA.")
+#|     if propio:
+#|         st.success(f"📌 Estás usando lineamientos propios de este curso: {propio}")
+#|         if st.button("↩️ Volver a usar el currículo oficial del sistema", key=f"lin_oficial_{aid}"):
+#|             usar_oficial(asig)
+#|             flash("Ahora el curso usa el currículo oficial del sistema.")
+#|             st.rerun()
+#|     elif n_ver == n_comp and n_des == n_comp:
+#|         st.success(f"✅ El currículo oficial de {asig['area']} · {asig['grado']} está verificado y listo.")
+#|     else:
+#|         st.warning(f"⚠️ El currículo oficial de este curso aún no está completo ({n_des} de {n_comp} competencias con "
+#|                    "desempeños). Puedes traerlo del MINEDU con IA o subir tus propios lineamientos.")
+#|
+#|     opcion = st.radio("Origen de los lineamientos", ["📘 Currículo oficial del sistema", "🔎 Consultar el MINEDU con IA",
+#|                                                       "📤 Subir mis lineamientos (PDF o Word)"],
+#|                       key=f"lin_op_{aid}", horizontal=True, label_visibility="collapsed")
+#|     if opcion.startswith("🔎"):
+#|         st.caption("El sistema revisa los PDF oficiales del MINEDU en gob.pe, busca los desempeños de este curso y los "
+#|                    "comprueba palabra por palabra contra el documento. Puede tardar unos minutos la primera vez.")
+#|         if confirmar("lineamientos", "Traer lineamientos del MINEDU", f"lin_traer_{aid}"):
+#|             barra = st.progress(0.0)
+#|             try:
+#|                 res = traer_oficial(asig, lambda f, t: barra.progress(min(f, 1.0), text=t))
+#|                 cobrar(uid, "lineamientos")
+#|                 flash(f"Listo: {res['desempenos']} desempeño(s) y {res['estandares']} estándar(es) verificados contra el PDF oficial.")
+#|                 siguiente_version(ver_key)
+#|                 st.rerun()
+#|             except Exception as e:
+#|                 st.error(f"No se pudo: {e}")
+#|     elif opcion.startswith("📤"):
+#|         st.caption("Sube el documento con tus lineamientos (por ejemplo, el Programa Curricular de tu nivel). "
+#|                    "Solo se usarán los desempeños que aparezcan en tu archivo.")
+#|         archivo = st.file_uploader("Archivo PDF o Word", type=["pdf", "docx", "txt"], key=f"lin_up_{aid}")
+#|         if archivo is not None and confirmar("lineamientos", "Leer mis lineamientos", f"lin_leer_{aid}"):
+#|             barra = st.progress(0.0)
+#|             try:
+#|                 res = desde_archivo(asig, archivo.name, archivo.getvalue(), lambda f, t: barra.progress(min(f, 1.0), text=t))
+#|                 cobrar(uid, "lineamientos")
+#|                 flash(f"Listo: {res['desempenos']} desempeño(s) y {res['estandares']} estándar(es) leídos de tu archivo.")
+#|                 siguiente_version(ver_key)
+#|                 st.rerun()
+#|             except Exception as e:
+#|                 st.error(f"No se pudo leer: {e}")
 #|
 #|
 #| def render():
 #|     asig = exigir_area()
 #|     uid, aid = st.session_state.user_id, asig["id"]
-#|     st.title("📅 Planificación anual")
-#|     st.caption(f"{asig['area']} · {asig['grado']} · Sección {asig['seccion'] or '—'}  |  Alineada a RM N.° 501-2025-MINEDU")
-#|     st.info("💡 Sigue los pasos de arriba hacia abajo. Todo lo que escribe la IA lo puedes editar antes de guardar.")
+#|     st.title("📅 Sílabo anual")
+#|     st.caption(f"{asig['area']} · {asig['grado']} · Sección {asig['seccion'] or '—'}  |  Alineado a CNEB y RM N.° 501-2025-MINEDU")
+#|     st.info("💡 Sigue los pasos de arriba hacia abajo. Lo que escribe la IA siempre lo puedes editar antes de guardar.")
 #|
 #|     ver_key = f"ver_anual_{aid}"
 #|     ver = st.session_state.get(ver_key, 0)
 #|     doc = get_doc(aid, "anual")
 #|     data = contenido(doc) if doc else {}
 #|
-#|     # ① DATOS INFORMATIVOS
+#|     # ① DATOS
 #|     st.subheader("① Datos informativos")
 #|     with st.expander("Ver y editar mis datos", expanded=not asig["director"]):
 #|         c1, c2 = st.columns(2)
@@ -2736,8 +3420,12 @@ elif pagina == PAG_ADMIN and es_admin:
 #|             flash("Datos guardados ✅")
 #|             st.rerun()
 #|
-#|     # ② CARACTERIZACIÓN
-#|     st.subheader("② Caracterización y contexto de tus estudiantes")
+#|     # ② LINEAMIENTOS
+#|     st.subheader("② Lineamientos del Estado")
+#|     _paso_lineamientos(asig, ver_key)
+#|
+#|     # ③ CARACTERIZACIÓN
+#|     st.subheader("③ Caracterización de tus estudiantes")
 #|     st.caption("Describe brevemente cómo son tus estudiantes. Si no sabes qué escribir, pide un boceto a la IA.")
 #|     notas = st.text_input("Cuéntame algo de tus estudiantes (opcional)", key=f"car_notas_{aid}",
 #|                           placeholder="Ej.: zona rural, les gusta el fútbol, varios trabajan con sus padres")
@@ -2758,12 +3446,12 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         flash("Caracterización guardada ✅")
 #|         st.rerun()
 #|
-#|     # ③ COMPETENCIAS
-#|     st.subheader("③ Competencias que trabajarás este año")
+#|     # ④ COMPETENCIAS
+#|     st.subheader("④ Competencias que trabajarás este año")
 #|     comps = competencias_de(asig["nivel"], asig["area"])
 #|     if not comps:
-#|         st.error("Esta área todavía no tiene competencias cargadas. Pide al administrador que las agregue "
-#|                  "en Administración → Currículo.")
+#|         st.error("Este curso todavía no tiene competencias cargadas. Pide al administrador que las agregue en "
+#|                  "Administración → Currículo.")
 #|         st.stop()
 #|     nombres = [c["nombre"] for c in comps]
 #|     sel = campo_multi("Competencias del año", f"comp_{aid}_{ver}", nombres, data.get("competencias_area") or nombres)
@@ -2776,20 +3464,25 @@ elif pagina == PAG_ADMIN and es_admin:
 #|             st.markdown(f"**{c['nombre']}**" + ("" if c["verificado"] else "  ⚠️ _pendiente de verificación_"))
 #|             st.markdown("\n".join(f"- {x}" for x in c["capacidades"]))
 #|
-#|     # ④ SITUACIONES SIGNIFICATIVAS Y UNIDADES
-#|     st.subheader("④ Situaciones significativas y unidades")
+#|     # ⑤ UNIDADES Y TEMAS
+#|     st.subheader("⑤ Unidades, situaciones significativas y temas")
 #|     unidades = data.get("unidades") or []
 #|     n = len(unidades)
+#|     spw = 3
 #|     if not unidades:
-#|         n = int(st.number_input("¿Cuántas unidades tendrá el año?", 1, 12, 6, key=f"nuni_{aid}"))
-#|     st.caption("La IA propone una situación significativa por unidad, con el problema del contexto, valores y competencias.")
-#|     if confirmar("anual", "✨ Generar situaciones significativas con IA" if not unidades else
-#|                  "🔄 Volver a generar (reemplaza lo actual)", f"anual_{aid}", asig=asig):
+#|         c1, c2 = st.columns(2)
+#|         n = int(c1.number_input("¿Cuántas unidades tendrá el año?", 1, 12, 6, key=f"nuni_{aid}"))
+#|         spw = int(c2.number_input("Clases por semana", 1, 8, 3, key=f"spw_anual_{aid}"))
+#|     st.caption("La IA propone, con los lineamientos de arriba, una situación significativa por unidad y los temas "
+#|                "(clases) de cada una.")
+#|     if confirmar("anual", "✨ Generar sílabo con IA" if not unidades else "🔄 Volver a generar (reemplaza lo actual)",
+#|                  f"anual_{aid}", asig=asig):
 #|         try:
-#|             with st.spinner("Creando situaciones significativas... (puede tardar un minuto)"):
-#|                 nuevas = _generar_unidades(asig, comps_sel, n)
-#|             guardar_doc(uid, aid, "anual", 1, f"Planificación anual {asig['area']} {asig['grado']}",
-#|                         {"competencias_area": sel, "unidades": nuevas}, normativa=normativa_vigente()[1])
+#|             with st.spinner("Creando tu sílabo... (puede tardar un minuto)"):
+#|                 nuevas = _generar_unidades(asig, comps_sel, n, spw)
+#|             guardar_doc(uid, aid, "anual", 1, f"Sílabo anual {asig['area']} {asig['grado']}",
+#|                         {"competencias_area": sel, "unidades": nuevas, "clases_por_semana": spw},
+#|                         normativa=normativa_vigente()[1])
 #|             cobrar(uid, "anual")
 #|             siguiente_version(ver_key)
 #|             flash("¡Listo! Revisa cada unidad y ajusta lo que quieras.")
@@ -2801,7 +3494,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         for u in unidades:
 #|             i = u["numero"]
 #|             base = f"an_{aid}_{ver}_{i}"
-#|             with st.expander(f"Unidad {i}: {u['titulo']}", expanded=(i == 1)):
+#|             with st.expander(f"Unidad {i}: {u['titulo']}  ·  {len(u.get('temas') or [])} temas", expanded=(i == 1)):
 #|                 campo_linea("Título de la unidad", f"{base}_t", u["titulo"])
 #|                 campo_texto("Problema identificado", f"{base}_p", u["problema"], 80)
 #|                 campo_texto("Situación significativa", f"{base}_s", u["situacion"], 160)
@@ -2810,29 +3503,37 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                 caps_op = [cap for c in comps if c["nombre"] in cs for cap in c["capacidades"]]
 #|                 campo_multi("Capacidades a trabajar", f"{base}_k", caps_op, u["capacidades"])
 #|                 campo_num("Semanas", f"{base}_w", 1, 12, u.get("semanas") or 4)
+#|                 campo_texto("Temas / clases de la unidad (uno por línea)", f"{base}_tm",
+#|                             "\n".join(t["titulo"] for t in u.get("temas") or []), 180,
+#|                             "Estos temas son los que luego eliges en «Temas y clases» para crear sesiones, fichas y desafíos.")
 #|
 #|         def recoger():
 #|             res = []
 #|             for u in unidades:
 #|                 i = u["numero"]
 #|                 base = f"an_{aid}_{ver}_{i}"
+#|                 previos = {norm(t["titulo"]): t for t in u.get("temas") or []}
+#|                 cs = st.session_state.get(f"{base}_c", u["competencias"])
+#|                 temas = []
+#|                 for linea in a_lista(st.session_state.get(f"{base}_tm", "")):
+#|                     t = previos.get(norm(linea)) or {"titulo": linea, "competencia": (cs or [""])[0], "desempeno_texto": ""}
+#|                     temas.append({**t, "titulo": linea})
 #|                 res.append({"numero": i, "titulo": st.session_state.get(f"{base}_t", u["titulo"]),
 #|                             "problema": st.session_state.get(f"{base}_p", ""),
 #|                             "situacion": st.session_state.get(f"{base}_s", ""),
 #|                             "valores": st.session_state.get(f"{base}_v", ""),
-#|                             "competencias": st.session_state.get(f"{base}_c", u["competencias"]),
-#|                             "capacidades": st.session_state.get(f"{base}_k", u["capacidades"]),
-#|                             "semanas": entero(st.session_state.get(f"{base}_w"), 4, 1, 12)})
+#|                             "competencias": cs, "capacidades": st.session_state.get(f"{base}_k", u["capacidades"]),
+#|                             "semanas": entero(st.session_state.get(f"{base}_w"), 4, 1, 12), "temas": temas})
 #|             return res
 #|
 #|         def guardar(lista):
-#|             guardar_doc(uid, aid, "anual", 1, f"Planificación anual {asig['area']} {asig['grado']}",
-#|                         {"competencias_area": sel, "unidades": lista})
+#|             guardar_doc(uid, aid, "anual", 1, f"Sílabo anual {asig['area']} {asig['grado']}",
+#|                         {**data, "competencias_area": sel, "unidades": lista})
 #|
 #|         b1, b2, b3 = st.columns(3)
-#|         if b1.button("💾 Guardar planificación", type="primary", key=f"an_save_{aid}", use_container_width=True):
+#|         if b1.button("💾 Guardar sílabo", type="primary", key=f"an_save_{aid}", use_container_width=True):
 #|             guardar(recoger())
-#|             st.success("Planificación guardada ✅")
+#|             st.success("Sílabo guardado ✅")
 #|         if b2.button("➕ Agregar unidad", key=f"an_add_{aid}", use_container_width=True):
 #|             lista = recoger()
 #|             lista.append(_vacia(len(lista) + 1, comps_sel))
@@ -2844,11 +3545,11 @@ elif pagina == PAG_ADMIN and es_admin:
 #|             siguiente_version(ver_key)
 #|             st.rerun()
 #|
-#|     # ⑤ VISTA PREVIA
+#|     # ⑥ DOCUMENTO
 #|     if doc:
-#|         st.subheader("⑤ Tu documento")
+#|         st.subheader("⑥ Tu documento")
 #|         vista_previa_y_descarga(doc["id"], f"anual_{aid}")
-#|         st.button("Siguiente: crear las unidades →", on_click=ir_a, args=(PAG_UNIDADES,), type="primary")
+#|         st.button("Siguiente: elegir un tema y crear sus materiales →", on_click=ir_a, args=(PAG_TEMAS,), type="primary")
 #@@ END
 #@@ MODULE v_unidades
 #| """Unidades de aprendizaje: producto, secuencia por semanas, propósitos, enfoques; importar y sincronizar."""
@@ -2924,7 +3625,11 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #|     primera = next(iter(mapa), "")
 #|     secuencia = []
-#|     for f in ia.get("secuencia") or []:
+#|     spw_ = max(1, int(spw))
+#|     for i, tm in enumerate(ua.get("temas") or []):           # los temas del sílabo anual mandan
+#|         secuencia.append({"semana": i // spw_ + 1, "titulo": tm["titulo"],
+#|                           "competencia": buscar_competencia(tm.get("competencia"), mapa) or primera})
+#|     for f in ([] if secuencia else ia.get("secuencia") or []):
 #|         if isinstance(f, dict):
 #|             secuencia.append({"semana": entero(f.get("semana"), 1, 1, 20), "titulo": s(f.get("titulo")),
 #|                               "competencia": buscar_competencia(f.get("competencia"), mapa) or primera})
@@ -2941,7 +3646,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #|
 #| def _generar_unidad(asig, ua, semanas, spw):
-#|     ctx, mapa = contexto_curricular(asig["nivel"], asig["area"], asig["grado"], ua["competencias"])
+#|     ctx, mapa = contexto_curricular(asig["nivel"], asig["area"], asig["grado"], ua["competencias"], asig["id"])
 #|     if not mapa:
 #|         raise RuntimeError("La unidad no tiene competencias válidas. Revisa la planificación anual.")
 #|     enfoques = transversales()[1]
@@ -2963,7 +3668,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| Entrega:
 #| - "titulo": título de la unidad.
 #| - "producto": {{"evidencia": producto o evidencia final de la unidad, "criterios": lista de 3 a 5 criterios de evaluación, "relacion": cómo se relaciona con otras áreas}}
-#| - "secuencia": lista de EXACTAMENTE {total} sesiones, cada una {{"semana": n, "titulo": pregunta o reto en voz del estudiante (ej. "¿Cómo repartimos en partes iguales?"), "competencia": nombre EXACTO}}.
+#| - "secuencia": {'(ya viene dada por los temas del sílabo; igual devuélvela)' if ua.get('temas') else ''} lista de EXACTAMENTE {total} sesiones, cada una {{"semana": n, "titulo": pregunta o reto en voz del estudiante (ej. "¿Cómo repartimos en partes iguales?"), "competencia": nombre EXACTO}}.
 #| - "propositos": un objeto por competencia: {{"competencia": nombre EXACTO, "desempenos": [números de los D elegidos, p. ej. [1,3]], "desempenos_texto": [solo si no hay D disponibles, 2 desempeños propuestos], "proposito": propósito de aprendizaje, "campo_tematico": contenidos, "evidencia": evidencia, "instrumento": instrumento de evaluación}}
 #| - "enfoques": 2 a 3 objetos {{"enfoque": nombre EXACTO, "acciones": acciones observables concretas para esta unidad}}."""
 #|     ia, _ = pedir_json(prompt)
@@ -2982,7 +3687,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #|
 #| def _importar_unidad(asig, ua, texto, semanas, spw):
-#|     ctx, mapa = contexto_curricular(asig["nivel"], asig["area"], asig["grado"], ua["competencias"])
+#|     ctx, mapa = contexto_curricular(asig["nivel"], asig["area"], asig["grado"], ua["competencias"], asig["id"])
 #|     prompt = f"""{preambulo()}
 #| Tengo una unidad de aprendizaje escrita por un docente. Conviértela al formato indicado SIN inventar contenido nuevo (si falta algo, déjalo vacío).
 #| Competencias de esta unidad: {', '.join(ua['competencias'])}
@@ -3184,8 +3889,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #|     st.divider()
 #|     vista_previa_y_descarga(doc["id"], f"unidad_{aid}_{n}", abierta=False)
-#|     st.divider()
-#|     render_examen_unidad(asig, doc)
+#|
 #|     if listar_docs(aid, "sesion", padre_id=doc["id"]):
 #|         st.button("Siguiente: generar las sesiones →", on_click=ir_a, args=(PAG_SESIONES,), type="primary",
 #|                   key=f"u_next_{aid}_{n}")
@@ -3194,7 +3898,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| def _sincronizar(asig, anual, ua, actual, ver_key):
 #|     """Trae la situación de la anual y alinea las filas de propósitos con las competencias de la unidad anual."""
 #|     uid, aid = st.session_state.user_id, asig["id"]
-#|     _, mapa = contexto_curricular(asig["nivel"], asig["area"], asig["grado"], ua["competencias"])
+#|     _, mapa = contexto_curricular(asig["nivel"], asig["area"], asig["grado"], ua["competencias"], asig["id"])
 #|     props = [p for p in actual.get("propositos", []) if p["competencia"] in mapa]
 #|     for nombre, info in mapa.items():
 #|         if not any(p["competencia"] == nombre for p in props):
@@ -3209,6 +3913,31 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     siguiente_version(ver_key)
 #|     flash("Unidad sincronizada con la planificación anual ✅")
 #|     st.rerun()
+#|
+#|
+#| def asegurar_unidad(asig, anual, ua):
+#|     """Devuelve el documento de la unidad; si no existe lo arma SIN IA a partir del sílabo (temas y currículo)."""
+#|     uid, aid = st.session_state.user_id, asig["id"]
+#|     doc = get_doc(aid, "unidad", numero=ua["numero"])
+#|     if doc:
+#|         return doc
+#|     _, mapa = contexto_curricular(asig["nivel"], asig["area"], asig["grado"], ua["competencias"], aid)
+#|     props = []
+#|     for nombre, info in mapa.items():
+#|         ds = [x["texto"] for x in info["des"][:3]]
+#|         props.append({"competencia": nombre, "capacidades": info["comp"]["capacidades"], "desempenos": ds,
+#|                       "por_verificar": not ds, "proposito": "", "campo_tematico": "", "evidencia": "", "instrumento": ""})
+#|     primera = next(iter(mapa), "")
+#|     spw = int(anual and contenido(anual).get("clases_por_semana") or 3)
+#|     secuencia = [{"semana": i // spw + 1, "titulo": tm["titulo"],
+#|                   "competencia": buscar_competencia(tm.get("competencia"), mapa) or primera}
+#|                  for i, tm in enumerate(ua.get("temas") or [])]
+#|     data = {"numero": ua["numero"], "titulo": ua["titulo"], "situacion": ua["situacion"],
+#|             "producto": {"evidencia": "", "criterios": "", "relacion": ""}, "secuencia": secuencia,
+#|             "propositos": props, "enfoques": [], "semanas": ua.get("semanas") or 4, "sesiones_por_semana": spw}
+#|     gid = guardar_doc(uid, aid, "unidad", ua["numero"], f"Unidad {ua['numero']}: {ua['titulo']}", data,
+#|                       padre_id=anual["id"], normativa=normativa_vigente()[1])
+#|     return get_doc_by_id(gid)
 #@@ END
 #@@ MODULE v_sesiones
 #| """Sesiones de aprendizaje + rúbrica, ficha de trabajo y examen de cada sesión."""
@@ -3218,8 +3947,10 @@ elif pagina == PAG_ADMIN and es_admin:
 #| from ia import pedir_json, preambulo
 #| from normativa import normativa_vigente
 #| from repo import cobrar, contenido, crear_sesiones_desde_secuencia, get_doc, get_doc_by_id, guardar_doc, listar_docs
-#| from ui import (PAG_ANUAL, PAG_UNIDADES, campo_linea, campo_multi, campo_num, campo_texto, confirmar, exigir_area,
-#|                 exigir_cadena, flash, siguiente_version, vista_previa_y_descarga)
+#| from examen_unidad import render as render_examen_unidad
+#| from ui import (PAG_ANUAL, campo_linea, campo_multi, campo_num, campo_texto, confirmar, exigir_area, exigir_cadena,
+#|                 flash, ir_a, siguiente_version, vista_previa_y_descarga)
+#| from v_unidades import _unidad, asegurar_unidad
 #| from util import a_lista, a_texto, entero, norm, s
 #|
 #|
@@ -3285,48 +4016,71 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #|
 #| # ------------------------------------------------------------------
-#| # PANTALLA
+#| # PANTALLA: TEMAS Y CLASES
 #| # ------------------------------------------------------------------
 #| def render():
 #|     asig = exigir_area()
 #|     uid, aid = st.session_state.user_id, asig["id"]
-#|     st.title("📝 Sesiones de aprendizaje")
-#|     st.info("💡 Elige la unidad y la sesión. En cada sesión tienes 4 pestañas: contenido, rúbrica, ficha y examen.")
-#|     if not get_doc(aid, "anual"):
-#|         exigir_cadena("Primero crea tu planificación anual.", PAG_ANUAL, "Ir a Planificación anual")
-#|     unidades = listar_docs(aid, "unidad")
+#|     st.title("🎯 Temas y clases")
+#|     st.info("💡 Elige un tema de tu sílabo (una clase) o una unidad completa y crea con IA sus sesiones, fichas, "
+#|             "desafíos, rúbricas y exámenes.")
+#|     anual = get_doc(aid, "anual")
+#|     if not anual:
+#|         exigir_cadena("Primero crea tu sílabo anual: de ahí salen las unidades y los temas.", PAG_ANUAL,
+#|                       "Ir al Sílabo anual")
+#|     unidades = contenido(anual).get("unidades") or []
 #|     if not unidades:
-#|         exigir_cadena("Primero crea al menos una unidad.", PAG_UNIDADES, "Ir a Unidades")
+#|         exigir_cadena("Tu sílabo anual todavía no tiene unidades. Genera el sílabo primero.", PAG_ANUAL,
+#|                       "Ir al Sílabo anual")
 #|
-#|     num = st.radio("Unidad", [u["numero"] for u in unidades], horizontal=True, key=f"se_unidad_{aid}",
+#|     num = st.radio("Unidad", [u["numero"] for u in unidades], horizontal=True, key=f"tc_unidad_{aid}",
 #|                    format_func=lambda n: f"Unidad {n}")
-#|     udoc = next(u for u in unidades if u["numero"] == num)
+#|     ua = next(u for u in unidades if u["numero"] == num)
+#|     st.caption(f"**{ua['titulo']}** · {len(ua.get('temas') or [])} temas")
+#|     udoc = asegurar_unidad(asig, anual, ua)
 #|     udata = contenido(udoc)
+#|
+#|     ambito = st.radio("¿Qué quieres trabajar?", ["📖 Una clase (un tema)", "📚 Toda la unidad"], horizontal=True,
+#|                       key="tc_ambito")
+#|     if ambito.startswith("📚"):
+#|         t1, t2, t3 = st.tabs(["📚 Unidad de aprendizaje", "🏆 Desafíos de la unidad", "📋 Examen de la unidad"])
+#|         with t1:
+#|             _unidad(asig, anual, ua)
+#|         with t2:
+#|             _tab_desafios(asig, udoc, udata, "unidad")
+#|         with t3:
+#|             render_examen_unidad(asig, udoc)
+#|         return
+#|
 #|     sesiones = listar_docs(aid, "sesion", padre_id=udoc["id"])
+#|     if not sesiones and udata.get("secuencia"):
+#|         crear_sesiones_desde_secuencia(uid, asig, udoc)
+#|         sesiones = listar_docs(aid, "sesion", padre_id=udoc["id"])
 #|     if not sesiones:
-#|         st.warning("Esta unidad todavía no tiene sesiones. Créalas desde la secuencia de la unidad.")
-#|         if udata.get("secuencia") and st.button("🧩 Crear sesiones de la secuencia", type="primary", key=f"se_crear_{udoc['id']}"):
-#|             creadas = crear_sesiones_desde_secuencia(uid, asig, udoc)
-#|             flash(f"Se crearon {creadas} sesión(es).")
-#|             st.rerun()
+#|         st.warning("Esta unidad todavía no tiene temas. Agrégalos en el **Sílabo anual** (campo «Temas / clases») "
+#|                    "o elige «Toda la unidad» para generar la unidad con IA.")
+#|         st.button("Ir al Sílabo anual", on_click=ir_a, args=(PAG_ANUAL,))
 #|         st.stop()
 #|
 #|     def etiqueta(i):
 #|         sd = contenido(sesiones[i])
-#|         return f"{'✅' if sd.get('inicio') else '⬜'} Sesión {sesiones[i]['numero']}: {sd.get('titulo', '')}"
+#|         return f"{'✅' if sd.get('inicio') else '⬜'} Clase {sesiones[i]['numero']}: {sd.get('titulo', '')}"
 #|
 #|     _masivo(asig, udoc, udata, sesiones)
-#|
-#|     idx = st.selectbox("Sesión", list(range(len(sesiones))), format_func=etiqueta, key=f"se_sel_{udoc['id']}")
+#|     idx = st.selectbox("Elige el tema (clase)", list(range(len(sesiones))), format_func=etiqueta,
+#|                        key=f"se_sel_{udoc['id']}")
 #|     sdoc = sesiones[idx]
-#|     t1, t2, t3, t4 = st.tabs(["📖 Contenido de sesión", "📊 Rúbrica", "📄 Ficha de trabajo", "📋 Examen"])
+#|     t1, t2, t3, t4, t5 = st.tabs(["📖 Sesión de aprendizaje", "📄 Ficha de trabajo", "📊 Rúbrica", "🏆 Desafíos",
+#|                                   "📋 Examen"])
 #|     with t1:
 #|         _tab_contenido(asig, udoc, udata, sdoc)
 #|     with t2:
-#|         _tab_rubrica(asig, sdoc)
-#|     with t3:
 #|         _tab_ficha(asig, sdoc)
+#|     with t3:
+#|         _tab_rubrica(asig, sdoc)
 #|     with t4:
+#|         _tab_desafios(asig, sdoc, udata, "clase")
+#|     with t5:
 #|         _tab_examen(asig, sdoc)
 #|
 #|
@@ -3616,6 +4370,90 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         st.success("Examen guardado ✅")
 #|     st.divider()
 #|     vista_previa_y_descarga(doc["id"], f"exa_{sdoc['id']}", abierta=False)
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # DESAFÍOS DE APRENDIZAJE (por clase o por unidad)
+#| # ------------------------------------------------------------------
+#| def _contexto_desafio(padre, udata, ambito):
+#|     d = contenido(padre)
+#|     if ambito == "unidad":
+#|         temas = "; ".join(f.get("titulo", "") for f in d.get("secuencia", []))
+#|         comps = d.get("propositos", [])
+#|         cab = f"UNIDAD: {d.get('titulo')}\nSituación significativa: {d.get('situacion')}\nTemas de la unidad: {temas}"
+#|     else:
+#|         sug = d.get("competencias_sugeridas") or []
+#|         comps = [c for c in (d.get("competencias") or [])] or [p for p in udata.get("propositos", [])
+#|                                                                 if not sug or p["competencia"] in sug]
+#|         cab = f"TEMA (CLASE): {d.get('titulo')}\nPropósito: {d.get('proposito', '')}\nUnidad: {udata.get('titulo')}"
+#|     des = "\n".join(f"- {c.get('competencia')}: " + " | ".join((c.get("desempenos") or [])[:3]) for c in comps)
+#|     return cab + "\nDesempeños oficiales que se desarrollan:\n" + des
+#|
+#|
+#| def _tab_desafios(asig, padre, udata, ambito):
+#|     uid, aid = st.session_state.user_id, asig["id"]
+#|     doc = get_doc(aid, "desafio", padre_id=padre["id"])
+#|     d = contenido(doc) if doc else {}
+#|     ver_key = f"ver_des_{padre['id']}"
+#|     ver = st.session_state.get(ver_key, 0)
+#|     st.caption("Retos motivadores para tus estudiantes, basados en el tema y en los desempeños oficiales. "
+#|                "Incluyen pasos, producto, criterios de logro y una hoja de seguimiento.")
+#|     c1, c2 = st.columns(2)
+#|     n = c1.number_input("Número de desafíos", 3, 10, 5, key=f"des_n_{padre['id']}")
+#|     modalidad = c2.selectbox("Modalidad", ["Mixto", "Individual", "En equipos"], key=f"des_m_{padre['id']}")
+#|     if confirmar("desafio", "✨ Crear desafíos con IA" if not doc else "🔄 Volver a crear los desafíos",
+#|                  f"des_{padre['id']}", asig=asig):
+#|         try:
+#|             prompt = f"""{preambulo()}
+#| Crea DESAFÍOS DE APRENDIZAJE para estudiantes de {asig['grado']} ({asig['nivel']}), área {asig['area']}, región {asig['region']}.
+#| {_contexto_desafio(padre, udata, ambito)}
+#| Número de desafíos: {int(n)}. Modalidad: {modalidad}.
+#| Cada desafío es un reto motivador y contextualizado que hace que el estudiante use lo aprendido, con dificultad creciente (Básico, Intermedio, Avanzado).
+#| Formato: {{"titulo":"...","introduccion":"mensaje motivador para los estudiantes","desafios":[{{"numero":1,"nombre":"...","reto":"...","pasos":["..."],"producto":"...","criterios":["..."],"nivel":"Básico","puntos":5}}]}}"""
+#|             with st.spinner("Creando los desafíos..."):
+#|                 ia, _ = pedir_json(prompt)
+#|             lista = [x for x in (ia.get("desafios") if isinstance(ia, dict) else []) or [] if isinstance(x, dict)]
+#|             if not lista:
+#|                 raise RuntimeError("La IA no devolvió desafíos. Intenta de nuevo.")
+#|             desafios = [{"numero": i, "nombre": s(x.get("nombre")), "reto": s(x.get("reto")), "pasos": a_lista(x.get("pasos")),
+#|                          "producto": s(x.get("producto")), "criterios": a_lista(x.get("criterios")),
+#|                          "nivel": s(x.get("nivel")), "puntos": s(x.get("puntos"))} for i, x in enumerate(lista, 1)]
+#|             guardar_doc(uid, aid, "desafio", 1, s(ia.get("titulo")) or f"Desafíos: {contenido(padre).get('titulo')}",
+#|                         {"titulo": s(ia.get("titulo")), "introduccion": s(ia.get("introduccion")),
+#|                          "modalidad": modalidad, "desafios": desafios}, padre_id=padre["id"],
+#|                         normativa=normativa_vigente()[1])
+#|             cobrar(uid, "desafio")
+#|             siguiente_version(ver_key)
+#|             flash("¡Desafíos listos! Revísalos y ajústalos.")
+#|             st.rerun()
+#|         except Exception as e:
+#|             st.error(f"No se pudo generar: {e}")
+#|     if not doc:
+#|         return
+#|     base = f"des_{padre['id']}_{ver}"
+#|     campo_linea("Título", f"{base}_t", d.get("titulo", ""))
+#|     campo_texto("Mensaje para los estudiantes", f"{base}_i", d.get("introduccion", ""), 80)
+#|     filas = [{"numero": x.get("numero"), "nombre": x.get("nombre"), "reto": x.get("reto"),
+#|               "pasos (separados por |)": " | ".join(x.get("pasos") or []), "producto": x.get("producto"),
+#|               "criterios (separados por |)": " | ".join(x.get("criterios") or []), "nivel": x.get("nivel"),
+#|               "puntos": x.get("puntos")} for x in d.get("desafios", [])]
+#|     cols = ["numero", "nombre", "reto", "pasos (separados por |)", "producto", "criterios (separados por |)", "nivel", "puntos"]
+#|     ed = _tabla(filas, cols, f"{base}_ed")
+#|     if st.button("💾 Guardar desafíos", type="primary", key=f"des_save_{padre['id']}"):
+#|         lista = []
+#|         for k, (_, r) in enumerate(ed.iterrows(), 1):
+#|             if s(r["nombre"]) or s(r["reto"]):
+#|                 lista.append({"numero": k, "nombre": s(r["nombre"]), "reto": s(r["reto"]),
+#|                               "pasos": [x.strip() for x in s(r["pasos (separados por |)"]).split("|") if x.strip()],
+#|                               "producto": s(r["producto"]),
+#|                               "criterios": [x.strip() for x in s(r["criterios (separados por |)"]).split("|") if x.strip()],
+#|                               "nivel": s(r["nivel"]), "puntos": s(r["puntos"])})
+#|         guardar_doc(uid, aid, "desafio", 1, st.session_state.get(f"{base}_t", "") or doc["titulo"],
+#|                     {**d, "titulo": st.session_state.get(f"{base}_t", ""),
+#|                      "introduccion": st.session_state.get(f"{base}_i", ""), "desafios": lista}, padre_id=padre["id"])
+#|         st.success("Desafíos guardados ✅")
+#|     st.divider()
+#|     vista_previa_y_descarga(doc["id"], f"des_{padre['id']}", abierta=False)
 #@@ END
 #@@ MODULE v_biblioteca
 #| """Mi Biblioteca: todos tus documentos ordenados por área y grado."""
@@ -3630,13 +4468,14 @@ elif pagina == PAG_ADMIN and es_admin:
 #| TIPOS = {"anual": ("📅", "Planificación anual", PAG_ANUAL), "unidad": ("📚", "Unidad", PAG_UNIDADES),
 #|          "sesion": ("📝", "Sesión", PAG_SESIONES), "rubrica": ("📊", "Rúbrica", PAG_SESIONES),
 #|          "ficha": ("📄", "Ficha", PAG_SESIONES), "examen": ("📋", "Examen de sesión", PAG_SESIONES),
-#|          "examen_unidad": ("🧪", "Examen de unidad", PAG_UNIDADES)}
-#| ORDEN = {"anual": 0, "unidad": 1, "sesion": 2, "rubrica": 3, "ficha": 4, "examen": 5, "examen_unidad": 6}
+#|          "examen_unidad": ("🧪", "Examen de unidad", PAG_UNIDADES),
+#|          "desafio": ("🏆", "Desafíos", PAG_SESIONES)}
+#| ORDEN = {"anual": 0, "unidad": 1, "sesion": 2, "rubrica": 3, "ficha": 4, "examen": 5, "examen_unidad": 6, "desafio": 7}
 #|
 #|
 #| def render():
 #|     uid = st.session_state.user_id
-#|     st.title("🗂️ Mi Biblioteca")
+#|     st.title("🗂️ Mi biblioteca")
 #|     st.caption("Todos tus documentos, organizados por área y grado. Descárgalos en Word cuando los necesites.")
 #|     asigs = listar_asignaciones(uid)
 #|     if not asigs:
@@ -3663,7 +4502,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                 if kb in st.session_state:
 #|                     datos, archivo = st.session_state[kb]
 #|                     c2.download_button("⬇️ Descargar", data=datos, file_name=archivo, mime=MIME_DOCX, key=f"dlb_{d['id']}")
-#|                 c3.button("Abrir área", key=f"op_{d['id']}", on_click=abrir_area, args=(a["id"], pagina))
+#|                 c3.button("Abrir curso", key=f"op_{d['id']}", on_click=abrir_area, args=(a["id"], pagina))
 #|                 if c4.button("🗑️", key=f"del_{d['id']}", help="Eliminar (también lo que depende de él)"):
 #|                     st.session_state[f"_del_{d['id']}"] = True
 #|                 if st.session_state.get(f"_del_{d['id']}"):
@@ -3988,7 +4827,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     ed = st.data_editor(df, key=f"des_ed_{cid}_{grado}", num_rows="dynamic", hide_index=True,
 #|                         column_config={"desempeño": st.column_config.TextColumn("Desempeño (texto oficial)", width="large")})
 #|     if st.button("💾 Guardar desempeños", type="primary", key=f"des_save_{cid}_{grado}"):
-#|         db_execute("DELETE FROM curriculo_desempenos WHERE competencia_id=%s AND grado=%s", (cid, grado))
+#|         db_execute("DELETE FROM curriculo_desempenos WHERE competencia_id=%s AND grado=%s AND asignacion_id IS NULL", (cid, grado))
 #|         filas = [(cid, grado, s(t), i) for i, t in enumerate(ed["desempeño"].fillna(""), 1) if s(t)]
 #|         execute_many("INSERT INTO curriculo_desempenos (competencia_id, grado, texto, orden) VALUES (%s,%s,%s,%s)", filas)
 #|         st.success(f"{len(filas)} desempeño(s) guardados ✅")
@@ -4025,7 +4864,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                                         "VALUES (%s,%s,%s,99,0)", (nivel, area, comp))
 #|                     creadas += 1
 #|                 if reemplazar and (cid, grado) not in limpiados:
-#|                     db_execute("DELETE FROM curriculo_desempenos WHERE competencia_id=%s AND grado=%s", (cid, grado))
+#|                     db_execute("DELETE FROM curriculo_desempenos WHERE competencia_id=%s AND grado=%s AND asignacion_id IS NULL", (cid, grado))
 #|                     limpiados.add((cid, grado))
 #|                 db_execute("INSERT INTO curriculo_desempenos (competencia_id, grado, texto, orden) VALUES (%s,%s,%s,%s)",
 #|                            (cid, grado, texto, insertados + 1))
