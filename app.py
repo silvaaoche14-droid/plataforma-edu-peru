@@ -135,10 +135,7 @@ with st.sidebar:
     creditos = "ilimitados" if es_admin else usuario["creditos"]
     st.markdown(f"<div class='usercard'><b>👤 {usuario['nombre']}</b>{' · 🛡️ Admin' if es_admin else ''}<br>"
                 f"<span class='chip'>🎟️ Créditos: {creditos}</span></div>", unsafe_allow_html=True)
-    if ids:
-        st.selectbox("📌 Curso activo", ids, key="area_id",
-                     format_func=lambda i: next(f"{a['area']} · {a['grado']} · {a['seccion'] or '—'}" for a in asigs if a["id"] == i))
-    else:
+    if not ids:
         st.caption("📌 Aún no tienes cursos. Crea uno en Inicio.")
     pagina = st.radio("Menú", paginas, key="nav", label_visibility="collapsed")
     st.divider()
@@ -230,10 +227,12 @@ elif pagina == PAG_ADMIN and es_admin:
 #@@ MODULE db
 #| """Conexión a MySQL (Aiven) y creación / actualización automática del esquema."""
 #| import copy
+#| import queue
+#| import threading
+#| import time
 #|
 #| import streamlit as st
 #| import mysql.connector
-#| from mysql.connector import pooling
 #|
 #|
 #| def _cfg():
@@ -241,23 +240,97 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     return dict(
 #|         host=s["host"], port=int(s["port"]), database=s["database"],
 #|         user=s["user"], password=s["password"],
-#|         ssl_disabled=False, connection_timeout=10,
+#|         ssl_disabled=False, connection_timeout=10, autocommit=True,
 #|     )
 #|
 #|
+#| class _Reserva:
+#|     """Pequeña reserva de conexiones abiertas. Cada consulta cuesta UNA sola ida y vuelta a la base
+#|     (sin «ping» ni «reset» en cada uso, que era lo que hacía lenta la página)."""
+#|
+#|     def __init__(self, tamano=4):
+#|         self.libres = queue.Queue()
+#|         self.tamano = tamano
+#|         self.abiertas = 0
+#|         self.candado = threading.Lock()
+#|
+#|     def _nueva(self):
+#|         c = mysql.connector.connect(**_cfg())
+#|         c._eduperu_uso = time.time()
+#|         return c
+#|
+#|     def tomar(self):
+#|         try:
+#|             c = self.libres.get_nowait()
+#|         except queue.Empty:
+#|             with self.candado:
+#|                 crear = self.abiertas < self.tamano
+#|                 if crear:
+#|                     self.abiertas += 1
+#|             if not crear:
+#|                 c = self.libres.get(timeout=30)
+#|             else:
+#|                 try:
+#|                     return self._nueva()
+#|                 except Exception:
+#|                     with self.candado:
+#|                         self.abiertas -= 1
+#|                     raise
+#|         # solo si estuvo ociosa un buen rato se comprueba que siga viva
+#|         if time.time() - getattr(c, "_eduperu_uso", 0) > 120:
+#|             try:
+#|                 c.ping(reconnect=True, attempts=2, delay=1)
+#|             except Exception:
+#|                 self.descartar(c)
+#|                 return self.tomar()
+#|         return c
+#|
+#|     def devolver(self, c):
+#|         c._eduperu_uso = time.time()
+#|         self.libres.put(c)
+#|
+#|     def descartar(self, c):
+#|         try:
+#|             c.close()
+#|         except Exception:
+#|             pass
+#|         with self.candado:
+#|             self.abiertas = max(0, self.abiertas - 1)
+#|
+#|
 #| @st.cache_resource(show_spinner=False)
-#| def _pool():
-#|     return pooling.MySQLConnectionPool(pool_name="eduperu_pool", pool_size=5, pool_reset_session=True, **_cfg())
+#| def _reserva():
+#|     return _Reserva()
+#|
+#|
+#| _ERRORES_CONEXION = (2006, 2013, 2055, 2003, 2027, 2014)
+#|
+#|
+#| def _con_reintento(operacion):
+#|     """Ejecuta operacion(conexion). Si la conexión estaba caída, abre otra y reintenta una vez."""
+#|     reserva = _reserva()
+#|     for intento in (1, 2):
+#|         c = reserva.tomar()
+#|         try:
+#|             res = operacion(c)
+#|             reserva.devolver(c)
+#|             return res
+#|         except mysql.connector.Error as e:
+#|             if getattr(e, "errno", None) in _ERRORES_CONEXION or isinstance(e, mysql.connector.InterfaceError):
+#|                 reserva.descartar(c)
+#|                 if intento == 1:
+#|                     continue
+#|             else:
+#|                 reserva.devolver(c)
+#|             raise
+#|         except Exception:
+#|             reserva.devolver(c)
+#|             raise
 #|
 #|
 #| def conexion():
-#|     """Conexión reutilizable (pool). Si el pool falla, abre una conexión directa."""
-#|     try:
-#|         conn = _pool().get_connection()
-#|         conn.ping(reconnect=True, attempts=2, delay=1)
-#|         return conn
-#|     except Exception:
-#|         return mysql.connector.connect(**_cfg())
+#|     """Conexión suelta (se usa solo al crear las tablas)."""
+#|     return mysql.connector.connect(**_cfg())
 #|
 #|
 #| def _memo():
@@ -276,14 +349,14 @@ elif pagina == PAG_ADMIN and es_admin:
 #|             return copy.deepcopy(memo[clave])
 #|     except TypeError:
 #|         clave = None
-#|     conn = conexion()
-#|     try:
+#|     def op(conn):
 #|         cur = conn.cursor(dictionary=True, buffered=True)
 #|         cur.execute(sql, params)
 #|         filas = cur.fetchone() if one else cur.fetchall()
 #|         cur.close()
-#|     finally:
-#|         conn.close()
+#|         return filas
+#|
+#|     filas = _con_reintento(op)
 #|     if clave is not None:
 #|         memo[clave] = copy.deepcopy(filas)
 #|     return filas
@@ -296,7 +369,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     except Exception:
 #|         pass
 #|     bajo = sql.lower()
-#|     if any(x in bajo for x in ("curriculo_", " config", "normativa_", "asignaciones")):
+#|     if any(x in bajo for x in ("curriculo_", " config", "normativa_")):
 #|         try:
 #|             st.cache_data.clear()
 #|         except Exception:
@@ -305,15 +378,14 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #| def execute(sql, params=()):
 #|     """Ejecuta INSERT/UPDATE/DELETE. Devuelve (último id, filas afectadas)."""
-#|     conn = conexion()
-#|     try:
+#|     def op(conn):
 #|         cur = conn.cursor(buffered=True)
 #|         cur.execute(sql, params)
-#|         conn.commit()
 #|         res = (cur.lastrowid, cur.rowcount)
 #|         cur.close()
-#|     finally:
-#|         conn.close()
+#|         return res
+#|
+#|     res = _con_reintento(op)
 #|     _tras_escribir(sql)
 #|     return res
 #|
@@ -321,14 +393,12 @@ elif pagina == PAG_ADMIN and es_admin:
 #| def execute_many(sql, filas):
 #|     if not filas:
 #|         return
-#|     conn = conexion()
-#|     try:
+#|     def op(conn):
 #|         cur = conn.cursor(buffered=True)
 #|         cur.executemany(sql, filas)
-#|         conn.commit()
 #|         cur.close()
-#|     finally:
-#|         conn.close()
+#|
+#|     _con_reintento(op)
 #|     _tras_escribir(sql)
 #|
 #|
@@ -591,10 +661,21 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     finally:
 #|         conn.close()
 #|     return True
+#|
+#|
+#| def medir_latencia(veces=5):
+#|     """Milisegundos que tarda una consulta mínima a la base (promedio)."""
+#|     inicio = time.time()
+#|     for _ in range(veces):
+#|         _con_reintento(lambda c: (lambda cur: (cur.execute("SELECT 1"), cur.fetchall(), cur.close()))(c.cursor()))
+#|     return (time.time() - inicio) * 1000 / veces
 #@@ END
 #@@ MODULE repo
 #| """Acceso a datos: usuarios, créditos, asignaciones (áreas del docente) y documentos."""
 #| import json
+#|
+#| import streamlit as st
+#|
 #| from db import fetch, execute
 #|
 #| ORDEN_NIVEL = {"Inicial": 0, "Primaria": 1, "Secundaria": 2}
@@ -622,6 +703,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| # ------------------------------------------------------------------
 #| # Configuración y créditos
 #| # ------------------------------------------------------------------
+#| @st.cache_data(ttl=300, show_spinner=False)
 #| def config_get(clave, defecto=None):
 #|     f = fetch("SELECT valor FROM config WHERE clave=%s", (clave,), one=True)
 #|     return f["valor"] if f else defecto
@@ -708,6 +790,21 @@ elif pagina == PAG_ADMIN and es_admin:
 #| def borrar_todas_asignaciones(uid):
 #|     for a in fetch("SELECT id FROM asignaciones WHERE usuario_id=%s", (uid,)):
 #|         borrar_asignacion(a["id"])
+#|
+#|
+#| def resumen_todas(uid):
+#|     """{asignacion_id: {tipo: cantidad}} para todos los cursos del usuario, en UNA sola consulta."""
+#|     res = {}
+#|     for f in fetch("SELECT asignacion_id, tipo, COUNT(*) AS n FROM documentos WHERE usuario_id=%s "
+#|                    "GROUP BY asignacion_id, tipo", (uid,)):
+#|         res.setdefault(f["asignacion_id"], {})[f["tipo"]] = f["n"]
+#|     return res
+#|
+#|
+#| def docs_del_usuario(uid):
+#|     """Lista liviana (sin el contenido) de todos los documentos del usuario."""
+#|     return fetch("SELECT id, asignacion_id, tipo, padre_id, numero, titulo, color, normativa_usada, actualizado_en "
+#|                  "FROM documentos WHERE usuario_id=%s ORDER BY asignacion_id, numero, id", (uid,))
 #|
 #|
 #| def resumen_asignacion(aid):
@@ -1344,7 +1441,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         b.append(("sub", f"{p.get('numero')}. {s(p.get('enunciado'))}  ({p.get('puntaje')} pts)"))
 #|         ops = p.get("opciones") or []
 #|         if ops:
-#|             b.append(("ul", ops))
+#|             b.append(("opciones", ops))
 #|         elif p.get("tipo") == "desarrollo":
 #|             b.append(("p", "______________________________________________________________"))
 #|     b += [("salto",), ("sec", "CLAVES DE RESPUESTA (SOLO PARA EL DOCENTE)"),
@@ -1447,6 +1544,12 @@ elif pagina == PAG_ADMIN and es_admin:
 #|             for item in blq[1]:
 #|                 if s(item):
 #|                     doc.add_paragraph(s(item), style="List Bullet")
+#|         elif tipo == "opciones":
+#|             for item in blq[1]:
+#|                 if s(item):
+#|                     p = doc.add_paragraph(s(item))
+#|                     p.paragraph_format.left_indent = Cm(1)
+#|                     p.paragraph_format.space_after = Pt(1)
 #|         elif tipo == "salto":
 #|             doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
 #|         if tipo in ("sec", "kv", "tabla"):
@@ -1540,6 +1643,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #|             out.append(f"<div class='sub'>{_h(blq[1])}</div>")
 #|         elif tipo == "ul":
 #|             out.append("<ul>" + "".join(f"<li>{_h(i)}</li>" for i in blq[1] if s(i)) + "</ul>")
+#|         elif tipo == "opciones":
+#|             out.append("<div style='margin:2px 0 8px 22px'>" + "".join(f"<div>{_h(i)}</div>" for i in blq[1] if s(i)) + "</div>")
 #|         elif tipo == "salto":
 #|             out.append("<div class='salto'></div>")
 #|     out.append(f"<div class='pie'>Normativa utilizada: {_h(pie or 'RM N.° 501-2025-MINEDU')}</div>")
@@ -2440,14 +2545,16 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                                  else "No se pudo crear la cuenta. Intenta de nuevo.")
 #@@ END
 #@@ MODULE ui
-#| """Piezas de interfaz compartidas: navegación, avisos, confirmación de costo, vista previa y descarga."""
+#| """Piezas de interfaz compartidas: navegación, selector de curso, avisos, costos, vista previa y editores."""
 #| import streamlit as st
 #| import streamlit.components.v1 as components
 #|
 #| from curriculo import bloqueo_curricular
-#| from repo import cambiar_color, costo_de, get_asignacion, get_doc_by_id, get_usuario, resumen_asignacion
-#| from render import COLORES, COLOR_DEFECTO, ICONO_COLOR, a_docx, a_html
 #| from exportar import bloques_de
+#| from repo import (cambiar_color, costo_de, get_asignacion, get_doc_by_id, get_usuario, listar_asignaciones,
+#|                   resumen_asignacion)
+#| from render import COLORES, COLOR_DEFECTO, ICONO_COLOR, a_docx, a_html
+#| from util import a_lista, a_texto, s
 #|
 #| PAG_PANEL = "🏠 Inicio"
 #| PAG_ANUAL = "📅 Sílabo anual"
@@ -2475,10 +2582,9 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #|
 #| def abrir_siguiente(aid):
-#|     """Activa el área y te lleva al siguiente paso pendiente (anual → unidades → sesiones)."""
+#|     """Activa el curso y te lleva al siguiente paso pendiente (sílabo anual → temas y clases)."""
 #|     r = resumen_asignacion(aid)
-#|     pagina = PAG_ANUAL if not r.get("anual") else PAG_TEMAS
-#|     abrir_area(aid, pagina)
+#|     abrir_area(aid, PAG_ANUAL if not r.get("anual") else PAG_TEMAS)
 #|
 #|
 #| def flash(mensaje, tipo="success"):
@@ -2495,15 +2601,38 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     st.info("💡 " + texto)
 #|
 #|
+#| def _etiqueta_curso(a):
+#|     return f"{a['area']} · {a['grado']} · Sección {a['seccion'] or '—'}"
+#|
+#|
 #| def area_activa():
+#|     """Curso activo del usuario (sale de la lista de sus cursos: no hace otra consulta)."""
 #|     aid = st.session_state.get("area_id")
-#|     return get_asignacion(aid) if aid else None
+#|     if not aid:
+#|         return None
+#|     return next((a for a in listar_asignaciones(st.session_state.user_id) if a["id"] == aid), None)
+#|
+#|
+#| def selector_curso(titulo="📌 ¿Para qué curso?"):
+#|     """Selector de curso al comienzo de la pantalla. Devuelve el curso elegido (o None si no hay cursos)."""
+#|     asigs = listar_asignaciones(st.session_state.user_id)
+#|     if not asigs:
+#|         return None
+#|     ids = [a["id"] for a in asigs]
+#|     actual = st.session_state.get("area_id")
+#|     with st.container(border=True):
+#|         elegido = st.selectbox(titulo, ids, index=ids.index(actual) if actual in ids else 0,
+#|                                key=f"selcurso_{st.session_state.get('nav', '')}",
+#|                                format_func=lambda i: _etiqueta_curso(next(a for a in asigs if a["id"] == i)))
+#|     st.session_state["area_id"] = elegido
+#|     return next(a for a in asigs if a["id"] == elegido)
 #|
 #|
 #| def exigir_area():
-#|     asig = area_activa()
+#|     """Muestra el selector de curso arriba; si no hay cursos, invita a crear uno."""
+#|     asig = selector_curso()
 #|     if not asig:
-#|         st.warning("👆 Primero elige o crea un **curso** en *Inicio*. Ahí indicas tu grado, área y sección.")
+#|         st.warning("👆 Primero crea un **curso** en *Inicio*. Ahí indicas tu grado, área y sección.")
 #|         st.button("Ir a Inicio", on_click=ir_a, args=(PAG_PANEL,))
 #|         st.stop()
 #|     return asig
@@ -2549,12 +2678,25 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     st.session_state[clave_ver] = st.session_state.get(clave_ver, 0) + 1
 #|
 #|
+#| def seccion(opciones, clave):
+#|     """Selector de secciones (reemplaza a las pestañas): solo se dibuja lo que eliges, así la página va más rápido."""
+#|     return st.radio("Sección", opciones, horizontal=True, key=clave, label_visibility="collapsed")
+#|
+#|
+#| def descargar(etiqueta, data, nombre, mime, key, **kw):
+#|     """Botón de descarga que NO vuelve a calcular la página (más rápido) cuando Streamlit lo permite."""
+#|     try:
+#|         return st.download_button(etiqueta, data=data, file_name=nombre, mime=mime, key=key, on_click="ignore", **kw)
+#|     except TypeError:
+#|         return st.download_button(etiqueta, data=data, file_name=nombre, mime=mime, key=key, **kw)
+#|
+#|
 #| # ------------------------------------------------------------------
 #| # Costo en créditos con confirmación
 #| # ------------------------------------------------------------------
 #| def confirmar(accion, etiqueta, clave, veces=1, asig=None):
 #|     """Botón que pide confirmar el costo en créditos. Devuelve True cuando el usuario confirma.
-#|     Si se pasa 'asig' y el administrador exige currículo verificado, bloquea las áreas sin verificar."""
+#|     Si se pasa 'asig' y el administrador exige currículo verificado, bloquea los cursos sin verificar."""
 #|     if asig is not None:
 #|         motivo = bloqueo_curricular(asig)
 #|         if motivo:
@@ -2587,38 +2729,102 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #|
 #| # ------------------------------------------------------------------
-#| # Vista previa, color y descarga
+#| # Vista previa, color y descarga (la descarga va PRIMERO)
 #| # ------------------------------------------------------------------
 #| def vista_previa_y_descarga(doc_id, clave, abierta=True):
 #|     doc = get_doc_by_id(doc_id)
 #|     if not doc:
 #|         return
 #|     color_doc = (doc.get("color") or COLOR_DEFECTO).lstrip("#")
-#|     nombre_actual = next((n for n, h in COLORES.items() if h == color_doc), "Azul")
+#|     nombres = list(COLORES)
+#|     actual = next((n for n, h in COLORES.items() if h == color_doc), "Azul")
+#|     c_desc, c_color = st.columns([3, 2])
 #|     ckey = f"color_{clave}_{doc_id}"
-#|     if ckey not in st.session_state:
-#|         st.session_state[ckey] = nombre_actual
-#|     elegido = st.radio("🎨 Color del documento", list(COLORES), key=ckey, horizontal=True,
-#|                        format_func=lambda n: f"{ICONO_COLOR[n]} {n}")
+#|     elegido = c_color.selectbox("🎨 Color del documento", nombres, index=nombres.index(actual), key=ckey,
+#|                                 format_func=lambda n: f"{ICONO_COLOR[n]} {n}")
 #|     color = COLORES[elegido]
 #|     if color != color_doc:
 #|         cambiar_color(doc_id, color)
 #|         doc["color"] = color
 #|     bloques, horizontal, archivo = bloques_de(doc)
+#|     with c_desc:
+#|         st.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
+#|         descargar("⬇️ Descargar en Word", a_docx(bloques, color, doc.get("normativa_usada"), horizontal), archivo,
+#|                   MIME_DOCX, f"dl_{clave}_{doc_id}", type="primary", use_container_width=True)
 #|     with st.expander("👁️ Vista previa del documento (se actualiza al guardar)", expanded=abierta):
-#|         components.html(a_html(bloques, color, doc.get("normativa_usada")), height=620, scrolling=True)
-#|     st.download_button("⬇️ Descargar en Word", data=a_docx(bloques, color, doc.get("normativa_usada"), horizontal),
-#|                        file_name=archivo, mime=MIME_DOCX, key=f"dl_{clave}_{doc_id}", type="primary")
+#|         components.html(a_html(bloques, color, doc.get("normativa_usada")), height=560, scrolling=True)
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # Editores por elemento (reemplazan a las tablas anchas: se ven ordenados también en el celular)
+#| # campos = [{"k": "enunciado", "label": "Enunciado", "tipo": "linea|area|lineas|select|lectura", "alto": 90, "opciones": [...]}]
+#| # ------------------------------------------------------------------
+#| def editor_items(clave, items, campos, titulo_fn, abiertos=1):
+#|     for i, it in enumerate(items):
+#|         with st.expander(titulo_fn(i, it), expanded=(i < abiertos)):
+#|             for c in campos:
+#|                 k, tipo = f"{clave}_{i}_{c['k']}", c.get("tipo", "linea")
+#|                 valor = it.get(c["k"])
+#|                 if tipo == "area":
+#|                     campo_texto(c["label"], k, s(valor), c.get("alto", 90))
+#|                 elif tipo == "lineas":
+#|                     campo_texto(c["label"], k, a_texto(valor), c.get("alto", 90), c.get("ayuda"))
+#|                 elif tipo == "select":
+#|                     ops = list(c["opciones"])
+#|                     if s(valor) and s(valor) not in ops:
+#|                         ops.insert(0, s(valor))
+#|                     if k not in st.session_state or st.session_state[k] not in ops:
+#|                         st.session_state[k] = s(valor) if s(valor) in ops else ops[0]
+#|                     st.selectbox(c["label"], ops, key=k)
+#|                 elif tipo == "lectura":
+#|                     if s(valor):
+#|                         st.caption(f"{c['label']}: {s(valor)}")
+#|                 else:
+#|                     campo_linea(c["label"], k, s(valor))
+#|
+#|
+#| def recoger_items(clave, items, campos):
+#|     res = []
+#|     for i, it in enumerate(items):
+#|         d = dict(it)
+#|         for c in campos:
+#|             tipo = c.get("tipo", "linea")
+#|             if tipo == "lectura":
+#|                 continue
+#|             v = st.session_state.get(f"{clave}_{i}_{c['k']}")
+#|             if v is not None:
+#|                 d[c["k"]] = a_lista(v) if tipo == "lineas" else s(v)
+#|         d["numero"] = i + 1
+#|         res.append(d)
+#|     return res
+#|
+#|
+#| def barra_edicion(clave, items, campos, vacio, guardar, ver_key):
+#|     """Botones Guardar / Agregar / Quitar el último para un editor_items. guardar(lista) persiste los cambios."""
+#|     c1, c2, c3 = st.columns(3)
+#|     if c1.button("💾 Guardar cambios", type="primary", key=f"{clave}_save", use_container_width=True):
+#|         guardar(recoger_items(clave, items, campos))
+#|         st.success("Guardado ✅")
+#|     if c2.button("➕ Agregar", key=f"{clave}_add", use_container_width=True):
+#|         lista = recoger_items(clave, items, campos)
+#|         lista.append(vacio(len(lista) + 1))
+#|         guardar(lista)
+#|         siguiente_version(ver_key)
+#|         st.rerun()
+#|     if c3.button("➖ Quitar el último", key=f"{clave}_rm", use_container_width=True) and len(items) > 1:
+#|         guardar(recoger_items(clave, items, campos)[:-1])
+#|         siguiente_version(ver_key)
+#|         st.rerun()
 #@@ END
 #@@ MODULE examen_unidad
 #| """Examen de unidad o bimestral: se arma con los desempeños (de la base oficial) y los temas de las unidades."""
-#| import pandas as pd
 #| import streamlit as st
 #|
 #| from ia import pedir_json, preambulo
 #| from normativa import normativa_vigente
 #| from repo import cobrar, contenido, get_doc, guardar_doc, listar_docs
-#| from ui import campo_linea, campo_texto, confirmar, siguiente_version, vista_previa_y_descarga
+#| from ui import (barra_edicion, campo_linea, campo_texto, confirmar, editor_items, siguiente_version,
+#|                 vista_previa_y_descarga)
 #| from util import a_lista, entero, norm, s
 #|
 #|
@@ -2676,9 +2882,18 @@ elif pagina == PAG_ADMIN and es_admin:
 #|             "preguntas": preguntas}
 #|
 #|
+#| CAMPOS = [{"k": "tipo", "label": "Tipo de pregunta", "tipo": "select",
+#|            "opciones": ["opcion_multiple", "desarrollo", "verdadero_falso"]},
+#|           {"k": "enunciado", "label": "Pregunta", "tipo": "area", "alto": 80},
+#|           {"k": "opciones", "label": "Alternativas (una por línea, ej.: a) …)", "tipo": "lineas", "alto": 100},
+#|           {"k": "respuesta", "label": "Respuesta correcta", "tipo": "linea"},
+#|           {"k": "puntaje", "label": "Puntaje", "tipo": "linea"},
+#|           {"k": "competencia", "label": "Competencia", "tipo": "lectura"},
+#|           {"k": "desempeno_texto", "label": "Desempeño que evalúa", "tipo": "lectura"}]
+#|
+#|
 #| def render(asig, udoc):
 #|     uid, aid = st.session_state.user_id, asig["id"]
-#|     st.markdown("### 📋 Examen de la unidad / bimestre")
 #|     st.caption("Se arma con los temas y los desempeños oficiales de las unidades que elijas. Incluye una matriz que "
 #|                "muestra qué desempeño evalúa cada pregunta.")
 #|     todas = listar_docs(aid, "unidad")
@@ -2688,53 +2903,45 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     ver_key = f"ver_exu_{udoc['id']}"
 #|     ver = st.session_state.get(ver_key, 0)
 #|
-#|     sel = st.multiselect("Unidades que incluye (para un examen bimestral elige varias)", numeros,
-#|                          default=[x for x in d.get("unidades", [udoc["numero"]]) if x in numeros] or [udoc["numero"]],
-#|                          key=f"exu_sel_{udoc['id']}_{ver}", format_func=lambda n: f"Unidad {n}")
-#|     c1, c2, c3 = st.columns(3)
-#|     n_preg = c1.number_input("Número de preguntas", 5, 40, 12, key=f"exu_n_{udoc['id']}")
-#|     tipos = c2.selectbox("Tipo de preguntas", ["Mixto", "Solo opción múltiple", "Solo desarrollo"], key=f"exu_t_{udoc['id']}")
-#|     total = c3.number_input("Puntaje total", 5, 100, 20, key=f"exu_p_{udoc['id']}")
-#|
-#|     etiqueta = "✨ Generar examen" if not doc else "🔄 Volver a generar el examen"
-#|     if confirmar("examen_unidad", etiqueta, f"exu_{udoc['id']}", asig=asig):
-#|         try:
-#|             elegidas = [u for u in todas if u["numero"] in sel] or [udoc]
-#|             with st.spinner("Armando el examen con los desempeños de las unidades..."):
-#|                 nuevo = generar(asig, elegidas, int(n_preg), tipos, int(total))
-#|             guardar_doc(uid, aid, "examen_unidad", udoc["numero"], nuevo["titulo"], nuevo, padre_id=udoc["id"],
-#|                         normativa=normativa_vigente()[1])
-#|             cobrar(uid, "examen_unidad")
-#|             siguiente_version(ver_key)
-#|             st.rerun()
-#|         except Exception as e:
-#|             st.error(f"No se pudo generar: {e}")
+#|     with st.expander("⚙️ Generar con IA", expanded=not doc):
+#|         sel = st.multiselect("Unidades que incluye (para un examen bimestral elige varias)", numeros,
+#|                              default=[x for x in d.get("unidades", [udoc["numero"]]) if x in numeros] or [udoc["numero"]],
+#|                              key=f"exu_sel_{udoc['id']}_{ver}", format_func=lambda n: f"Unidad {n}")
+#|         c1, c2, c3 = st.columns(3)
+#|         n_preg = c1.number_input("Número de preguntas", 5, 40, 12, key=f"exu_n_{udoc['id']}")
+#|         tipos = c2.selectbox("Tipo de preguntas", ["Mixto", "Solo opción múltiple", "Solo desarrollo"], key=f"exu_t_{udoc['id']}")
+#|         total = c3.number_input("Puntaje total", 5, 100, 20, key=f"exu_p_{udoc['id']}")
+#|         etiqueta = "✨ Generar examen" if not doc else "🔄 Volver a generar el examen"
+#|         if confirmar("examen_unidad", etiqueta, f"exu_{udoc['id']}", asig=asig):
+#|             try:
+#|                 elegidas = [u for u in todas if u["numero"] in sel] or [udoc]
+#|                 with st.spinner("Armando el examen con los desempeños de las unidades..."):
+#|                     nuevo = generar(asig, elegidas, int(n_preg), tipos, int(total))
+#|                 guardar_doc(uid, aid, "examen_unidad", udoc["numero"], nuevo["titulo"], nuevo, padre_id=udoc["id"],
+#|                             normativa=normativa_vigente()[1])
+#|                 cobrar(uid, "examen_unidad")
+#|                 siguiente_version(ver_key)
+#|                 st.rerun()
+#|             except Exception as e:
+#|                 st.error(f"No se pudo generar: {e}")
 #|     if not doc:
 #|         return
 #|
-#|     base = f"exu_{udoc['id']}_{ver}"
-#|     campo_linea("Título del examen", f"{base}_t", d.get("titulo", ""))
-#|     campo_texto("Indicaciones", f"{base}_i", d.get("instrucciones", ""), 80)
-#|     filas = [{"numero": p.get("numero"), "tipo": p.get("tipo"), "enunciado": p.get("enunciado"),
-#|               "opciones": " | ".join(p.get("opciones") or []), "respuesta": p.get("respuesta"), "puntaje": p.get("puntaje"),
-#|               "competencia": p.get("competencia"), "desempeño evaluado": p.get("desempeno_texto")}
-#|              for p in d.get("preguntas", [])]
-#|     cols = ["numero", "tipo", "enunciado", "opciones", "respuesta", "puntaje", "competencia", "desempeño evaluado"]
-#|     ed = st.data_editor(pd.DataFrame(filas, columns=cols), key=f"{base}_ed", num_rows="dynamic", hide_index=True).fillna("")
-#|     if st.button("💾 Guardar examen", type="primary", key=f"exu_save_{udoc['id']}"):
-#|         pregs = []
-#|         for k, (_, r) in enumerate(ed.iterrows(), 1):
-#|             if s(r["enunciado"]):
-#|                 pregs.append({"numero": k, "tipo": s(r["tipo"]) or "desarrollo", "enunciado": s(r["enunciado"]),
-#|                               "opciones": [x.strip() for x in s(r["opciones"]).split("|") if x.strip()],
-#|                               "respuesta": s(r["respuesta"]), "puntaje": s(r["puntaje"]) or "1",
-#|                               "competencia": s(r["competencia"]), "desempeno_texto": s(r["desempeño evaluado"])})
-#|         guardar_doc(uid, aid, "examen_unidad", udoc["numero"], st.session_state.get(f"{base}_t", ""),
-#|                     {**d, "titulo": st.session_state.get(f"{base}_t", ""),
-#|                      "instrucciones": st.session_state.get(f"{base}_i", ""), "preguntas": pregs}, padre_id=udoc["id"])
-#|         st.success("Examen guardado ✅")
-#|     st.divider()
-#|     vista_previa_y_descarga(doc["id"], f"exu_{udoc['id']}", abierta=False)
+#|     vista_previa_y_descarga(doc["id"], f"exu_{udoc['id']}")
+#|     with st.expander("✏️ Editar el examen"):
+#|         clave = f"exu_{udoc['id']}_{ver}"
+#|         campo_linea("Título del examen", f"{clave}_t", d.get("titulo", ""))
+#|         campo_texto("Indicaciones", f"{clave}_i", d.get("instrucciones", ""), 80)
+#|         items = d.get("preguntas", [])
+#|         editor_items(clave, items, CAMPOS, lambda i, x: f"Pregunta {i + 1}: {s(x.get('enunciado'))[:60]}")
+#|         barra_edicion(clave, items, CAMPOS,
+#|                       lambda n: {"numero": n, "tipo": "desarrollo", "enunciado": "", "opciones": [], "respuesta": "",
+#|                                  "puntaje": "1", "competencia": "", "desempeno_texto": ""},
+#|                       lambda lista: guardar_doc(uid, aid, "examen_unidad", udoc["numero"],
+#|                                                 st.session_state.get(f"{clave}_t", "") or doc["titulo"],
+#|                                                 {**d, "titulo": st.session_state.get(f"{clave}_t", ""),
+#|                                                  "instrucciones": st.session_state.get(f"{clave}_i", ""),
+#|                                                  "preguntas": lista}, padre_id=udoc["id"]), ver_key)
 #@@ END
 #@@ MODULE v_curriculo
 #| """Currículo oficial: los lineamientos del MINEDU por curso (solo lectura; la IA no toca este contenido)."""
@@ -2940,7 +3147,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| from calendario import (AUTO, DIAS, MESES, TIPOS, a_ics, agregar, borrar, eventos_mes, parsear_fechas,
 #|                         programar_clases, sugerir_con_ia)
 #| from repo import cobrar
-#| from ui import area_activa, confirmar, flash
+#| from ui import confirmar, descargar, flash, selector_curso
 #|
 #|
 #| def _mover(delta):
@@ -2959,7 +3166,6 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #| def render():
 #|     uid = st.session_state.user_id
-#|     asig = area_activa()
 #|     hoy = dt.date.today()
 #|     st.session_state.setdefault("cal_y", hoy.year)
 #|     st.session_state.setdefault("cal_m", hoy.month)
@@ -2969,6 +3175,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     st.info("💡 Programa tus clases, exámenes y actividades. Puedes repartir automáticamente las clases de tu sílabo "
 #|             "y pedir sugerencias a la IA.")
 #|
+#|     asig = selector_curso("📌 ¿Para qué curso programas?")
 #|     c1, c2, c3, c4 = st.columns([1, 3, 1, 2])
 #|     c1.button("◀ Anterior", on_click=_mover, args=(-1,), key="cal_prev", use_container_width=True)
 #|     c2.markdown(f"<h3 style='text-align:center;margin:0'>{MESES[m]} {y}</h3>", unsafe_allow_html=True)
@@ -3018,8 +3225,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|             borrar(e["id"], uid)
 #|             st.rerun()
 #|     if eventos:
-#|         st.download_button("⬇️ Descargar calendario (.ics)", data=a_ics(eventos), file_name=f"calendario_{y}_{m:02d}.ics",
-#|                            mime="text/calendar", key="cal_ics")
+#|         descargar("⬇️ Descargar calendario (.ics)", a_ics(eventos), f"calendario_{y}_{m:02d}.ics", "text/calendar", "cal_ics")
 #|
 #|     with st.expander("➕ Agregar un evento"):
 #|         with st.form("cal_nuevo", clear_on_submit=True):
@@ -3097,7 +3303,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #| from curriculo import GRADOS, NIVELES, REGIONES, areas_de, estado_area
 #| from repo import (borrar_asignacion, borrar_todas_asignaciones, crear_asignacion, get_usuario, listar_asignaciones,
-#|                   resumen_asignacion)
+#|                   resumen_todas)
 #| from ui import PAG_ANUAL, PAG_BIBLIO, PAG_CALENDARIO, PAG_CURRICULO, PAG_TEMAS, abrir_siguiente, flash
 #|
 #| CLASE, UNIDAD = "📖 Una clase (un tema)", "📚 Toda la unidad"
@@ -3177,7 +3383,21 @@ elif pagina == PAG_ADMIN and es_admin:
 #| <div class="hero-s">Crea tu sílabo, tus clases, fichas, desafíos y exámenes en minutos, alineados al CNEB y a la RM N.° 501-2025-MINEDU.</div>
 #| <span class="chip">🎟️ Créditos: {creditos}</span></div>""", unsafe_allow_html=True)
 #|
+#|     # ---------- HERRAMIENTAS ----------
+#|     st.subheader("🛠️ ¿Qué quieres crear hoy?")
+#|     st.caption("Elige una herramienta. En la siguiente pantalla te preguntaré para qué curso.")
+#|     for fila in range(0, len(HERRAMIENTAS), 4):
+#|         cols = st.columns(4)
+#|         for col, (icono, titulo, desc, pagina, ambito) in zip(cols, HERRAMIENTAS[fila:fila + 4]):
+#|             with col:
+#|                 with st.container(border=True):
+#|                     st.markdown(f"<div class='tool-i'>{icono}</div><div class='tool-t'>{titulo}</div>"
+#|                                 f"<div class='tool-d'>{desc}</div>", unsafe_allow_html=True)
+#|                     st.button("Abrir", key=f"tool_{titulo}", on_click=_ir_herramienta, args=(pagina, ambito),
+#|                               use_container_width=True)
+#|
 #|     # ---------- MIS CURSOS ----------
+#|     st.divider()
 #|     h1, h2 = st.columns([6, 1])
 #|     h1.subheader("📚 Mis cursos")
 #|     if asigs:
@@ -3212,6 +3432,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     if not asigs:
 #|         st.info("💡 **Empieza aquí:** crea tu primer curso (solo toma un minuto) y luego sigue con el sílabo anual.")
 #|     activa = st.session_state.get("area_id")
+#|     resumen = resumen_todas(uid) if asigs else {}
 #|     for nivel in NIVELES:
 #|         grupo = [a for a in asigs if a["nivel"] == nivel]
 #|         if not grupo:
@@ -3233,23 +3454,10 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                         n.button("No", key=f"xn_{a['id']}", on_click=_cancelar_borrar, args=(a["id"],),
 #|                                  use_container_width=True)
 #|                     else:
-#|                         r = resumen_asignacion(a["id"])
+#|                         r = resumen.get(a["id"], {})
 #|                         st.caption(f"📅 {'✅' if r.get('anual') else '⬜'}  📚 {r.get('unidad', 0)}  📝 {r.get('sesion', 0)}")
 #|                         st.button("Abrir ▶", key=f"abrir_{a['id']}", on_click=abrir_siguiente, args=(a["id"],),
 #|                                   use_container_width=True, type="primary")
-#|
-#|     # ---------- HERRAMIENTAS ----------
-#|     st.subheader("🛠️ Herramientas")
-#|     st.caption("Todo lo que puedes crear con IA. Elige una para empezar.")
-#|     for fila in range(0, len(HERRAMIENTAS), 4):
-#|         cols = st.columns(4)
-#|         for col, (icono, titulo, desc, pagina, ambito) in zip(cols, HERRAMIENTAS[fila:fila + 4]):
-#|             with col:
-#|                 with st.container(border=True):
-#|                     st.markdown(f"<div class='tool-i'>{icono}</div><div class='tool-t'>{titulo}</div>"
-#|                                 f"<div class='tool-d'>{desc}</div>", unsafe_allow_html=True)
-#|                     st.button("Abrir", key=f"tool_{titulo}", on_click=_ir_herramienta, args=(pagina, ambito),
-#|                               use_container_width=True)
 #@@ END
 #@@ MODULE v_anual
 #| """Sílabo anual: datos, lineamientos del Estado, caracterización, competencias, unidades y temas (clases)."""
@@ -3260,7 +3468,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| from lineamientos import desde_archivo, traer_oficial, usar_oficial
 #| from normativa import normativa_vigente
 #| from repo import actualizar_asignacion, cobrar, contenido, get_doc, guardar_doc
-#| from ui import (PAG_TEMAS, campo_linea, campo_multi, campo_num, campo_texto, confirmar, exigir_area, flash, ir_a,
+#| from ui import (MIME_DOCX, PAG_TEMAS, campo_linea, descargar, campo_multi, campo_num, campo_texto, confirmar, exigir_area, flash, ir_a,
 #|                 siguiente_version, vista_previa_y_descarga)
 #| from util import a_lista, entero, norm, s
 #|
@@ -3403,6 +3611,12 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     ver = st.session_state.get(ver_key, 0)
 #|     doc = get_doc(aid, "anual")
 #|     data = contenido(doc) if doc else {}
+#|     if doc:
+#|         from exportar import bloques_de
+#|         from render import a_docx
+#|         bl, hor, archivo = bloques_de(doc)
+#|         descargar("⬇️ Descargar mi sílabo en Word", a_docx(bl, doc.get("color"), doc.get("normativa_usada"), hor), archivo,
+#|                   MIME_DOCX, f"dl_top_anual_{aid}", type="primary")
 #|
 #|     # ① DATOS
 #|     st.subheader("① Datos informativos")
@@ -3782,93 +3996,95 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         st.caption("Aún no hay contenido para esta unidad.")
 #|         return
 #|
-#|     # --- Edición
-#|     base = f"u_{aid}_{n}_{ver}"
-#|     st.markdown("### ✏️ Edita tu unidad")
-#|     campo_linea("Título de la unidad", f"{base}_tit", d.get("titulo", ""))
-#|     campo_texto("Situación significativa", f"{base}_sit", d.get("situacion", ""), 150)
+#|     vista_previa_y_descarga(doc["id"], f"unidad_{aid}_{n}")
+#|     with st.expander("✏️ Editar la unidad"):
+#|         # --- Edición
+#|         base = f"u_{aid}_{n}_{ver}"
+#|         st.markdown("### ✏️ Edita tu unidad")
+#|         campo_linea("Título de la unidad", f"{base}_tit", d.get("titulo", ""))
+#|         campo_texto("Situación significativa", f"{base}_sit", d.get("situacion", ""), 150)
 #|
-#|     st.markdown("**Producto de aprendizaje**")
-#|     pr = d.get("producto") or {}
-#|     campo_texto("Evidencia (producto final)", f"{base}_pe", pr.get("evidencia", ""), 80)
-#|     campo_texto("Criterios de evaluación (uno por línea)", f"{base}_pc", pr.get("criterios", ""), 110)
-#|     campo_texto("Relación con otras áreas", f"{base}_pr", pr.get("relacion", ""), 80)
+#|         st.markdown("**Producto de aprendizaje**")
+#|         pr = d.get("producto") or {}
+#|         campo_texto("Evidencia (producto final)", f"{base}_pe", pr.get("evidencia", ""), 80)
+#|         campo_texto("Criterios de evaluación (uno por línea)", f"{base}_pc", pr.get("criterios", ""), 110)
+#|         campo_texto("Relación con otras áreas", f"{base}_pr", pr.get("relacion", ""), 80)
 #|
-#|     st.markdown("**Secuencia de la unidad** (cada fila es una sesión; puedes agregar, borrar o cambiar títulos)")
-#|     nombres_comp = [p["competencia"] for p in d.get("propositos", [])]
-#|     filas = [{"semana": f.get("semana", 1), "titulo": f.get("titulo", ""),
-#|               "competencia": f.get("competencia") if f.get("competencia") in nombres_comp else (nombres_comp[0] if nombres_comp else "")}
-#|              for f in d.get("secuencia", [])]
-#|     df = pd.DataFrame(filas, columns=["semana", "titulo", "competencia"])
-#|     df["semana"] = pd.to_numeric(df["semana"], errors="coerce").fillna(1).astype(int)
-#|     seq = st.data_editor(df, key=f"{base}_seq", num_rows="dynamic", hide_index=True, column_config={
-#|         "semana": st.column_config.NumberColumn("Semana", min_value=1, max_value=20, step=1),
-#|         "titulo": st.column_config.TextColumn("Título / pregunta retadora", width="large"),
-#|         "competencia": st.column_config.SelectboxColumn("Competencia", options=nombres_comp or [""])})
+#|         st.markdown("**Secuencia de la unidad** (cada fila es una sesión; puedes agregar, borrar o cambiar títulos)")
+#|         nombres_comp = [p["competencia"] for p in d.get("propositos", [])]
+#|         filas = [{"semana": f.get("semana", 1), "titulo": f.get("titulo", ""),
+#|                   "competencia": f.get("competencia") if f.get("competencia") in nombres_comp else (nombres_comp[0] if nombres_comp else "")}
+#|                  for f in d.get("secuencia", [])]
+#|         df = pd.DataFrame(filas, columns=["semana", "titulo", "competencia"])
+#|         df["semana"] = pd.to_numeric(df["semana"], errors="coerce").fillna(1).astype(int)
+#|         seq = st.data_editor(df, key=f"{base}_seq", num_rows="dynamic", hide_index=True, column_config={
+#|             "semana": st.column_config.NumberColumn("Semana", min_value=1, max_value=20, step=1),
+#|             "titulo": st.column_config.TextColumn("Título / pregunta retadora", width="large"),
+#|             "competencia": st.column_config.SelectboxColumn("Competencia", options=nombres_comp or [""])})
 #|
-#|     st.markdown("**Propósitos de aprendizaje**")
-#|     props = d.get("propositos", [])
-#|     for j, p in enumerate(props):
-#|         with st.expander(p["competencia"], expanded=(j == 0)):
-#|             if p.get("por_verificar"):
-#|                 st.caption("⚠️ Desempeños por verificar con el Programa Curricular oficial.")
-#|             campo_texto("Capacidades (una por línea)", f"{base}_p{j}_cap", a_texto(p.get("capacidades")), 90)
-#|             campo_texto("Desempeños (uno por línea)", f"{base}_p{j}_des", a_texto(p.get("desempenos")), 130)
-#|             campo_texto("Propósito de aprendizaje", f"{base}_p{j}_pro", p.get("proposito", ""), 80)
-#|             campo_linea("Campo temático", f"{base}_p{j}_ct", p.get("campo_tematico", ""))
-#|             campo_texto("Evidencia", f"{base}_p{j}_ev", p.get("evidencia", ""), 70)
-#|             campo_linea("Instrumento de evaluación", f"{base}_p{j}_in", p.get("instrumento", ""))
-#|
-#|     st.markdown("**Enfoques transversales**")
-#|     enfoques_db = transversales()[1]
-#|     nombres_enf = [e["nombre"] for e in enfoques_db]
-#|     elegidos = campo_multi("Enfoques de esta unidad", f"{base}_enf", nombres_enf,
-#|                            [e["enfoque"] for e in d.get("enfoques", [])])
-#|     previos = {e["enfoque"]: e.get("acciones", "") for e in d.get("enfoques", [])}
-#|     for k, nombre in enumerate(elegidos):
-#|         campo_texto(f"Acciones observables — {nombre}", f"{base}_enf_{k}_{norm(nombre)[:12]}",
-#|                     previos.get(nombre, ""), 70)
-#|
-#|     def recoger():
-#|         st_ = st.session_state
-#|         nueva_seq = []
-#|         for _, f in seq.fillna("").iterrows():
-#|             if s(f["titulo"]):
-#|                 nueva_seq.append({"semana": entero(f["semana"], 1, 1, 20), "titulo": s(f["titulo"]),
-#|                                   "competencia": s(f["competencia"])})
-#|         nuevos_props = []
+#|         st.markdown("**Propósitos de aprendizaje**")
+#|         props = d.get("propositos", [])
 #|         for j, p in enumerate(props):
-#|             nuevos_props.append({**p, "capacidades": a_lista(st_.get(f"{base}_p{j}_cap")),
-#|                                  "desempenos": a_lista(st_.get(f"{base}_p{j}_des")),
-#|                                  "proposito": st_.get(f"{base}_p{j}_pro", ""),
-#|                                  "campo_tematico": st_.get(f"{base}_p{j}_ct", ""),
-#|                                  "evidencia": st_.get(f"{base}_p{j}_ev", ""),
-#|                                  "instrumento": st_.get(f"{base}_p{j}_in", "")})
-#|         nuevos_enf = []
-#|         for k, nombre in enumerate(st_.get(f"{base}_enf", [])):
-#|             e = next((x for x in enfoques_db if x["nombre"] == nombre), None)
-#|             nuevos_enf.append({"enfoque": nombre, "valores": ", ".join(e["items"]) if e else "",
-#|                                "acciones": st_.get(f"{base}_enf_{k}_{norm(nombre)[:12]}", "")})
-#|         return {**d, "titulo": st_.get(f"{base}_tit", d.get("titulo")), "situacion": st_.get(f"{base}_sit", ""),
-#|                 "producto": {"evidencia": st_.get(f"{base}_pe", ""), "criterios": st_.get(f"{base}_pc", ""),
-#|                              "relacion": st_.get(f"{base}_pr", "")},
-#|                 "secuencia": nueva_seq, "propositos": nuevos_props, "enfoques": nuevos_enf}
+#|             with st.expander(p["competencia"], expanded=(j == 0)):
+#|                 if p.get("por_verificar"):
+#|                     st.caption("⚠️ Desempeños por verificar con el Programa Curricular oficial.")
+#|                 campo_texto("Capacidades (una por línea)", f"{base}_p{j}_cap", a_texto(p.get("capacidades")), 90)
+#|                 campo_texto("Desempeños (uno por línea)", f"{base}_p{j}_des", a_texto(p.get("desempenos")), 130)
+#|                 campo_texto("Propósito de aprendizaje", f"{base}_p{j}_pro", p.get("proposito", ""), 80)
+#|                 campo_linea("Campo temático", f"{base}_p{j}_ct", p.get("campo_tematico", ""))
+#|                 campo_texto("Evidencia", f"{base}_p{j}_ev", p.get("evidencia", ""), 70)
+#|                 campo_linea("Instrumento de evaluación", f"{base}_p{j}_in", p.get("instrumento", ""))
 #|
-#|     b1, b2, b3 = st.columns(3)
-#|     if b1.button("💾 Guardar unidad", type="primary", key=f"u_save_{aid}_{n}", use_container_width=True):
-#|         nuevo = recoger()
-#|         guardar_doc(uid, aid, "unidad", n, f"Unidad {n}: {nuevo['titulo']}", nuevo, padre_id=anual["id"])
-#|         st.success("Unidad guardada ✅")
-#|     if b2.button("🔄 Sincronizar con la anual", key=f"u_sync_{aid}_{n}", use_container_width=True,
-#|                  help="Trae de la planificación anual la situación significativa y ajusta las competencias."):
-#|         _sincronizar(asig, anual, ua, recoger(), ver_key)
-#|     if b3.button("🧩 Crear sesiones de la secuencia", key=f"u_ses_{aid}_{n}", use_container_width=True,
-#|                  help="Crea una sesión por cada fila de la secuencia, listas para generar."):
-#|         nuevo = recoger()
-#|         gid = guardar_doc(uid, aid, "unidad", n, f"Unidad {n}: {nuevo['titulo']}", nuevo, padre_id=anual["id"])
-#|         creadas = crear_sesiones_desde_secuencia(uid, asig, get_doc_by_id(gid))
-#|         flash(f"Se crearon {creadas} sesión(es). Ahora ve a la pestaña Sesiones.")
-#|         st.rerun()
+#|         st.markdown("**Enfoques transversales**")
+#|         enfoques_db = transversales()[1]
+#|         nombres_enf = [e["nombre"] for e in enfoques_db]
+#|         elegidos = campo_multi("Enfoques de esta unidad", f"{base}_enf", nombres_enf,
+#|                                [e["enfoque"] for e in d.get("enfoques", [])])
+#|         previos = {e["enfoque"]: e.get("acciones", "") for e in d.get("enfoques", [])}
+#|         for k, nombre in enumerate(elegidos):
+#|             campo_texto(f"Acciones observables — {nombre}", f"{base}_enf_{k}_{norm(nombre)[:12]}",
+#|                         previos.get(nombre, ""), 70)
+#|
+#|         def recoger():
+#|             st_ = st.session_state
+#|             nueva_seq = []
+#|             for _, f in seq.fillna("").iterrows():
+#|                 if s(f["titulo"]):
+#|                     nueva_seq.append({"semana": entero(f["semana"], 1, 1, 20), "titulo": s(f["titulo"]),
+#|                                       "competencia": s(f["competencia"])})
+#|             nuevos_props = []
+#|             for j, p in enumerate(props):
+#|                 nuevos_props.append({**p, "capacidades": a_lista(st_.get(f"{base}_p{j}_cap")),
+#|                                      "desempenos": a_lista(st_.get(f"{base}_p{j}_des")),
+#|                                      "proposito": st_.get(f"{base}_p{j}_pro", ""),
+#|                                      "campo_tematico": st_.get(f"{base}_p{j}_ct", ""),
+#|                                      "evidencia": st_.get(f"{base}_p{j}_ev", ""),
+#|                                      "instrumento": st_.get(f"{base}_p{j}_in", "")})
+#|             nuevos_enf = []
+#|             for k, nombre in enumerate(st_.get(f"{base}_enf", [])):
+#|                 e = next((x for x in enfoques_db if x["nombre"] == nombre), None)
+#|                 nuevos_enf.append({"enfoque": nombre, "valores": ", ".join(e["items"]) if e else "",
+#|                                    "acciones": st_.get(f"{base}_enf_{k}_{norm(nombre)[:12]}", "")})
+#|             return {**d, "titulo": st_.get(f"{base}_tit", d.get("titulo")), "situacion": st_.get(f"{base}_sit", ""),
+#|                     "producto": {"evidencia": st_.get(f"{base}_pe", ""), "criterios": st_.get(f"{base}_pc", ""),
+#|                                  "relacion": st_.get(f"{base}_pr", "")},
+#|                     "secuencia": nueva_seq, "propositos": nuevos_props, "enfoques": nuevos_enf}
+#|
+#|         b1, b2, b3 = st.columns(3)
+#|         if b1.button("💾 Guardar unidad", type="primary", key=f"u_save_{aid}_{n}", use_container_width=True):
+#|             nuevo = recoger()
+#|             guardar_doc(uid, aid, "unidad", n, f"Unidad {n}: {nuevo['titulo']}", nuevo, padre_id=anual["id"])
+#|             st.success("Unidad guardada ✅")
+#|         if b2.button("🔄 Sincronizar con la anual", key=f"u_sync_{aid}_{n}", use_container_width=True,
+#|                      help="Trae de la planificación anual la situación significativa y ajusta las competencias."):
+#|             _sincronizar(asig, anual, ua, recoger(), ver_key)
+#|         if b3.button("🧩 Crear sesiones de la secuencia", key=f"u_ses_{aid}_{n}", use_container_width=True,
+#|                      help="Crea una sesión por cada fila de la secuencia, listas para generar."):
+#|             nuevo = recoger()
+#|             gid = guardar_doc(uid, aid, "unidad", n, f"Unidad {n}: {nuevo['titulo']}", nuevo, padre_id=anual["id"])
+#|             creadas = crear_sesiones_desde_secuencia(uid, asig, get_doc_by_id(gid))
+#|             flash(f"Se crearon {creadas} sesión(es). Ahora ve a la pestaña Sesiones.")
+#|             st.rerun()
 #|
 #|     with st.expander("🔎 Revisar coherencia con la planificación anual"):
 #|         if confirmar("revision", "Revisar con IA", f"rev_{aid}_{n}", asig=asig):
@@ -3887,8 +4103,6 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         if st.session_state.get(f"rev_txt_{aid}_{n}"):
 #|             st.markdown(st.session_state[f"rev_txt_{aid}_{n}"])
 #|
-#|     st.divider()
-#|     vista_previa_y_descarga(doc["id"], f"unidad_{aid}_{n}", abierta=False)
 #|
 #|     if listar_docs(aid, "sesion", padre_id=doc["id"]):
 #|         st.button("Siguiente: generar las sesiones →", on_click=ir_a, args=(PAG_SESIONES,), type="primary",
@@ -3940,16 +4154,15 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     return get_doc_by_id(gid)
 #@@ END
 #@@ MODULE v_sesiones
-#| """Sesiones de aprendizaje + rúbrica, ficha de trabajo y examen de cada sesión."""
-#| import pandas as pd
+#| """Temas y clases: sesión, ficha, rúbrica, desafíos y examen de cada tema; unidad, desafíos y examen de la unidad."""
 #| import streamlit as st
 #|
+#| from examen_unidad import render as render_examen_unidad
 #| from ia import pedir_json, preambulo
 #| from normativa import normativa_vigente
-#| from repo import cobrar, contenido, crear_sesiones_desde_secuencia, get_doc, get_doc_by_id, guardar_doc, listar_docs
-#| from examen_unidad import render as render_examen_unidad
-#| from ui import (PAG_ANUAL, campo_linea, campo_multi, campo_num, campo_texto, confirmar, exigir_area, exigir_cadena,
-#|                 flash, ir_a, siguiente_version, vista_previa_y_descarga)
+#| from repo import cobrar, contenido, crear_sesiones_desde_secuencia, get_doc, guardar_doc, listar_docs
+#| from ui import (PAG_ANUAL, barra_edicion, campo_linea, campo_num, campo_texto, confirmar, editor_items, exigir_area,
+#|                 exigir_cadena, flash, ir_a, recoger_items, seccion, siguiente_version, vista_previa_y_descarga)
 #| from v_unidades import _unidad, asegurar_unidad
 #| from util import a_lista, a_texto, entero, norm, s
 #|
@@ -4043,12 +4256,12 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     ambito = st.radio("¿Qué quieres trabajar?", ["📖 Una clase (un tema)", "📚 Toda la unidad"], horizontal=True,
 #|                       key="tc_ambito")
 #|     if ambito.startswith("📚"):
-#|         t1, t2, t3 = st.tabs(["📚 Unidad de aprendizaje", "🏆 Desafíos de la unidad", "📋 Examen de la unidad"])
-#|         with t1:
+#|         sec = seccion(["📚 Unidad de aprendizaje", "🏆 Desafíos de la unidad", "📋 Examen de la unidad"], "tc_sec_unidad")
+#|         if sec.startswith("📚"):
 #|             _unidad(asig, anual, ua)
-#|         with t2:
+#|         elif sec.startswith("🏆"):
 #|             _tab_desafios(asig, udoc, udata, "unidad")
-#|         with t3:
+#|         else:
 #|             render_examen_unidad(asig, udoc)
 #|         return
 #|
@@ -4070,17 +4283,17 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     idx = st.selectbox("Elige el tema (clase)", list(range(len(sesiones))), format_func=etiqueta,
 #|                        key=f"se_sel_{udoc['id']}")
 #|     sdoc = sesiones[idx]
-#|     t1, t2, t3, t4, t5 = st.tabs(["📖 Sesión de aprendizaje", "📄 Ficha de trabajo", "📊 Rúbrica", "🏆 Desafíos",
-#|                                   "📋 Examen"])
-#|     with t1:
+#|     sec = seccion(["📖 Sesión de aprendizaje", "📄 Ficha de trabajo", "📊 Rúbrica", "🏆 Desafíos", "📋 Examen"],
+#|                   "tc_sec_clase")
+#|     if sec.startswith("📖"):
 #|         _tab_contenido(asig, udoc, udata, sdoc)
-#|     with t2:
+#|     elif sec.startswith("📄"):
 #|         _tab_ficha(asig, sdoc)
-#|     with t3:
+#|     elif sec.startswith("📊"):
 #|         _tab_rubrica(asig, sdoc)
-#|     with t4:
+#|     elif sec.startswith("🏆"):
 #|         _tab_desafios(asig, sdoc, udata, "clase")
-#|     with t5:
+#|     else:
 #|         _tab_examen(asig, sdoc)
 #|
 #|
@@ -4112,7 +4325,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #|
 #| # ------------------------------------------------------------------
-#| # PESTAÑA 1: CONTENIDO
+#| # SESIÓN
 #| # ------------------------------------------------------------------
 #| def _tab_contenido(asig, udoc, udata, sdoc):
 #|     uid, aid = st.session_state.user_id, asig["id"]
@@ -4120,81 +4333,82 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     ver_key = f"ver_ses_{sdoc['id']}"
 #|     ver = st.session_state.get(ver_key, 0)
 #|     props = [p["competencia"] for p in udata.get("propositos", [])]
+#|     hecho = bool(d.get("inicio"))
 #|
-#|     c1, c2 = st.columns(2)
-#|     duracion = c1.number_input("Duración (minutos)", 20, 240, entero(d.get("duracion"), 90, 20, 240), step=5,
-#|                                key=f"ses_dur_{sdoc['id']}_{ver}")
-#|     sel = c2.multiselect("Competencias de esta sesión", props,
-#|                          default=[x for x in (d.get("competencias_sugeridas") or props[:1]) if x in props],
-#|                          key=f"ses_comp_{sdoc['id']}_{ver}")
-#|     notas = st.text_input("Indicaciones especiales (opcional)", key=f"ses_notas_{sdoc['id']}_{ver}",
-#|                           placeholder="Ej.: aula multigrado, sin proyector, usar material reciclable")
-#|     etiqueta = "✨ Generar sesión con IA" if not d.get("inicio") else "🔄 Volver a generar (reemplaza lo actual)"
-#|     if confirmar("sesion", etiqueta, f"ses_{sdoc['id']}", asig=asig):
-#|         try:
-#|             with st.spinner("Creando la sesión..."):
-#|                 nuevo = generar_sesion(asig, udata, d, int(duracion), sel, notas)
-#|             guardar_doc(uid, aid, "sesion", sdoc["numero"], f"Sesión {sdoc['numero']}: {nuevo['titulo']}", nuevo,
-#|                         padre_id=udoc["id"], normativa=normativa_vigente()[1])
-#|             cobrar(uid, "sesion")
-#|             siguiente_version(ver_key)
-#|             flash("¡Sesión lista! Revísala y ajústala.")
-#|             st.rerun()
-#|         except Exception as e:
-#|             st.error(f"No se pudo generar: {e}")
-#|
-#|     if not d.get("inicio"):
+#|     with st.expander("⚙️ Opciones y generación con IA", expanded=not hecho):
+#|         c1, c2 = st.columns(2)
+#|         duracion = c1.number_input("Duración (minutos)", 20, 240, entero(d.get("duracion"), 90, 20, 240), step=5,
+#|                                    key=f"ses_dur_{sdoc['id']}_{ver}")
+#|         sel = c2.multiselect("Competencias de esta sesión", props,
+#|                              default=[x for x in (d.get("competencias_sugeridas") or props[:1]) if x in props],
+#|                              key=f"ses_comp_{sdoc['id']}_{ver}")
+#|         notas = st.text_input("Indicaciones especiales (opcional)", key=f"ses_notas_{sdoc['id']}_{ver}",
+#|                               placeholder="Ej.: aula multigrado, sin proyector, usar material reciclable")
+#|         etiqueta = "✨ Generar sesión con IA" if not hecho else "🔄 Volver a generar (reemplaza lo actual)"
+#|         if confirmar("sesion", etiqueta, f"ses_{sdoc['id']}", asig=asig):
+#|             try:
+#|                 with st.spinner("Creando la sesión..."):
+#|                     nuevo = generar_sesion(asig, udata, d, int(duracion), sel, notas)
+#|                 guardar_doc(uid, aid, "sesion", sdoc["numero"], f"Sesión {sdoc['numero']}: {nuevo['titulo']}", nuevo,
+#|                             padre_id=udoc["id"], normativa=normativa_vigente()[1])
+#|                 cobrar(uid, "sesion")
+#|                 siguiente_version(ver_key)
+#|                 flash("¡Sesión lista! Descárgala en Word o edítala.")
+#|                 st.rerun()
+#|             except Exception as e:
+#|                 st.error(f"No se pudo generar: {e}")
+#|     if not hecho:
 #|         st.caption("Aún no hay contenido en esta sesión.")
 #|         return
 #|
-#|     base = f"s_{sdoc['id']}_{ver}"
-#|     campo_linea("Título de la sesión", f"{base}_tit", d.get("titulo", ""))
-#|     campo_texto("Propósito de aprendizaje", f"{base}_pro", d.get("proposito", ""), 80)
-#|     filas = d.get("competencias", [])
-#|     for j, c in enumerate(filas):
-#|         with st.expander(f"Competencia: {c['competencia']}", expanded=(j == 0)):
-#|             if c.get("por_verificar"):
-#|                 st.caption("⚠️ Desempeños por verificar con el Programa Curricular oficial.")
+#|     vista_previa_y_descarga(sdoc["id"], f"sesion_{sdoc['id']}")
+#|     with st.expander("✏️ Editar la sesión"):
+#|         base = f"s_{sdoc['id']}_{ver}"
+#|         campo_linea("Título de la sesión", f"{base}_tit", d.get("titulo", ""))
+#|         campo_texto("Propósito de aprendizaje", f"{base}_pro", d.get("proposito", ""), 80)
+#|         filas = d.get("competencias", [])
+#|         for j, c in enumerate(filas):
+#|             st.markdown(f"**Competencia:** {c['competencia']}" + ("  ⚠️ _desempeños por verificar_" if c.get("por_verificar") else ""))
 #|             campo_texto("Criterios de evaluación (uno por línea)", f"{base}_c{j}_cr", a_texto(c.get("criterios")), 100)
 #|             campo_texto("Evidencia de aprendizaje", f"{base}_c{j}_ev", c.get("evidencia", ""), 70)
 #|             campo_linea("Instrumento", f"{base}_c{j}_in", c.get("instrumento", ""))
-#|     st.markdown("**Secuencia didáctica**")
-#|     for k, nombre in (("inicio", "Inicio"), ("desarrollo", "Desarrollo"), ("cierre", "Cierre")):
-#|         m = d.get(k) or {}
-#|         campo_texto(f"{nombre}", f"{base}_{k}_a", m.get("actividades", ""), 140 if k == "desarrollo" else 100)
-#|         campo_num(f"Minutos de {nombre.lower()}", f"{base}_{k}_m", 1, 240, entero(m.get("minutos"), 10))
-#|     campo_texto("Materiales y recursos (uno por línea)", f"{base}_mat", a_texto(d.get("materiales")), 90)
-#|     campo_texto("Reflexión sobre el aprendizaje (una pregunta por línea)", f"{base}_ref", a_texto(d.get("reflexion")), 90)
-#|
-#|     if st.button("💾 Guardar sesión", type="primary", key=f"s_save_{sdoc['id']}"):
-#|         ss = st.session_state
-#|         nuevas = [{**c, "criterios": a_lista(ss.get(f"{base}_c{j}_cr")), "evidencia": ss.get(f"{base}_c{j}_ev", ""),
-#|                    "instrumento": ss.get(f"{base}_c{j}_in", "")} for j, c in enumerate(filas)]
-#|         nuevo = {**d, "titulo": ss.get(f"{base}_tit", ""), "proposito": ss.get(f"{base}_pro", ""), "competencias": nuevas,
-#|                  "materiales": a_lista(ss.get(f"{base}_mat")), "reflexion": a_lista(ss.get(f"{base}_ref"))}
-#|         for k in ("inicio", "desarrollo", "cierre"):
-#|             nuevo[k] = {"actividades": ss.get(f"{base}_{k}_a", ""), "minutos": entero(ss.get(f"{base}_{k}_m"), 10, 1, 240)}
-#|         guardar_doc(uid, aid, "sesion", sdoc["numero"], f"Sesión {sdoc['numero']}: {nuevo['titulo']}", nuevo,
-#|                     padre_id=udoc["id"])
-#|         st.success("Sesión guardada ✅")
-#|     st.divider()
-#|     vista_previa_y_descarga(sdoc["id"], f"sesion_{sdoc['id']}", abierta=False)
+#|         st.markdown("**Secuencia didáctica**")
+#|         for k, nombre in (("inicio", "Inicio"), ("desarrollo", "Desarrollo"), ("cierre", "Cierre")):
+#|             m = d.get(k) or {}
+#|             campo_texto(nombre, f"{base}_{k}_a", m.get("actividades", ""), 140 if k == "desarrollo" else 100)
+#|             campo_num(f"Minutos de {nombre.lower()}", f"{base}_{k}_m", 1, 240, entero(m.get("minutos"), 10))
+#|         campo_texto("Materiales y recursos (uno por línea)", f"{base}_mat", a_texto(d.get("materiales")), 90)
+#|         campo_texto("Reflexión sobre el aprendizaje (una pregunta por línea)", f"{base}_ref", a_texto(d.get("reflexion")), 90)
+#|         if st.button("💾 Guardar sesión", type="primary", key=f"s_save_{sdoc['id']}"):
+#|             ss = st.session_state
+#|             nuevas = [{**c, "criterios": a_lista(ss.get(f"{base}_c{j}_cr")), "evidencia": ss.get(f"{base}_c{j}_ev", ""),
+#|                        "instrumento": ss.get(f"{base}_c{j}_in", "")} for j, c in enumerate(filas)]
+#|             nuevo = {**d, "titulo": ss.get(f"{base}_tit", ""), "proposito": ss.get(f"{base}_pro", ""), "competencias": nuevas,
+#|                      "materiales": a_lista(ss.get(f"{base}_mat")), "reflexion": a_lista(ss.get(f"{base}_ref"))}
+#|             for k in ("inicio", "desarrollo", "cierre"):
+#|                 nuevo[k] = {"actividades": ss.get(f"{base}_{k}_a", ""), "minutos": entero(ss.get(f"{base}_{k}_m"), 10, 1, 240)}
+#|             guardar_doc(uid, aid, "sesion", sdoc["numero"], f"Sesión {sdoc['numero']}: {nuevo['titulo']}", nuevo,
+#|                         padre_id=udoc["id"])
+#|             st.success("Sesión guardada ✅ (la vista previa se actualiza al volver a abrir esta sección)")
 #|
 #|
-#| # ------------------------------------------------------------------
-#| # PESTAÑAS 2-4: MATERIALES (rúbrica, ficha, examen)
-#| # ------------------------------------------------------------------
 #| def _necesita_sesion(sdoc):
 #|     sd = contenido(sdoc)
 #|     if not sd.get("inicio"):
-#|         st.info("Primero genera el **contenido de la sesión** (pestaña 1); de ahí salen los criterios y las evidencias.")
+#|         st.info("Primero genera la **sesión de aprendizaje** (sección «📖 Sesión de aprendizaje»): de ahí salen los "
+#|                 "criterios y las evidencias.")
 #|         return None
 #|     return sd
 #|
 #|
-#| def _tabla(filas, columnas, clave, config=None):
-#|     df = pd.DataFrame(filas, columns=columnas)
-#|     return st.data_editor(df, key=clave, num_rows="dynamic", hide_index=True, column_config=config or {}).fillna("")
+#| # ------------------------------------------------------------------
+#| # RÚBRICA
+#| # ------------------------------------------------------------------
+#| CAMPOS_RUBRICA = [{"k": "criterio", "label": "Criterio", "tipo": "linea"},
+#|                   {"k": "AD", "label": "AD · Logro destacado", "tipo": "area", "alto": 70},
+#|                   {"k": "A", "label": "A · Logro esperado", "tipo": "area", "alto": 70},
+#|                   {"k": "B", "label": "B · En proceso", "tipo": "area", "alto": 70},
+#|                   {"k": "C", "label": "C · En inicio", "tipo": "area", "alto": 70}]
 #|
 #|
 #| def _tab_rubrica(asig, sdoc):
@@ -4206,44 +4420,50 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     d = contenido(doc) if doc else {}
 #|     ver_key = f"ver_rub_{sdoc['id']}"
 #|     ver = st.session_state.get(ver_key, 0)
-#|     if confirmar("rubrica", "✨ Generar rúbrica con IA" if not doc else "🔄 Volver a generar la rúbrica", f"rub_{sdoc['id']}", asig=asig):
-#|         try:
-#|             prompt = f"""{preambulo()}
+#|     with st.expander("⚙️ Generar con IA", expanded=not doc):
+#|         if confirmar("rubrica", "✨ Generar rúbrica con IA" if not doc else "🔄 Volver a generar la rúbrica",
+#|                      f"rub_{sdoc['id']}", asig=asig):
+#|             try:
+#|                 prompt = f"""{preambulo()}
 #| Elabora una RÚBRICA de evaluación para esta sesión (nivel {asig['nivel']}, grado {asig['grado']}, área {asig['area']}).
 #| Sesión: {sd.get('titulo')}
 #| Competencias, criterios y evidencias:
 #| {_resumen_competencias(sd)}
 #| Entrega entre 3 y 5 criterios (puedes partir de los criterios dados). Para cada uno describe lo observable en cuatro niveles: AD (logro destacado), A (logro esperado), B (en proceso), C (en inicio).
 #| Formato: {{"criterios":[{{"criterio":"...","AD":"...","A":"...","B":"...","C":"..."}}]}}"""
-#|             with st.spinner("Creando la rúbrica..."):
-#|                 ia, _ = pedir_json(prompt)
-#|             lista = ia.get("criterios") if isinstance(ia, dict) else ia
-#|             filas = [{"criterio": s(r.get("criterio")), "AD": s(r.get("AD")), "A": s(r.get("A")), "B": s(r.get("B")),
-#|                       "C": s(r.get("C"))} for r in (lista or []) if isinstance(r, dict)]
-#|             if not filas:
-#|                 raise RuntimeError("La IA no devolvió criterios. Intenta de nuevo.")
-#|             guardar_doc(uid, aid, "rubrica", 1, f"Rúbrica: {sd.get('titulo')}", {"criterios": filas},
-#|                         padre_id=sdoc["id"], normativa=normativa_vigente()[1])
-#|             cobrar(uid, "rubrica")
-#|             siguiente_version(ver_key)
-#|             flash("Rúbrica lista ✅")
-#|             st.rerun()
-#|         except Exception as e:
-#|             st.error(f"No se pudo generar: {e}")
+#|                 with st.spinner("Creando la rúbrica..."):
+#|                     ia, _ = pedir_json(prompt)
+#|                 lista = ia.get("criterios") if isinstance(ia, dict) else ia
+#|                 filas = [{"numero": i, "criterio": s(r.get("criterio")), "AD": s(r.get("AD")), "A": s(r.get("A")),
+#|                           "B": s(r.get("B")), "C": s(r.get("C"))} for i, r in enumerate(lista or [], 1) if isinstance(r, dict)]
+#|                 if not filas:
+#|                     raise RuntimeError("La IA no devolvió criterios. Intenta de nuevo.")
+#|                 guardar_doc(uid, aid, "rubrica", 1, f"Rúbrica: {sd.get('titulo')}", {"criterios": filas},
+#|                             padre_id=sdoc["id"], normativa=normativa_vigente()[1])
+#|                 cobrar(uid, "rubrica")
+#|                 siguiente_version(ver_key)
+#|                 flash("Rúbrica lista ✅")
+#|                 st.rerun()
+#|             except Exception as e:
+#|                 st.error(f"No se pudo generar: {e}")
 #|     if not doc:
 #|         return
-#|     ed = _tabla(d.get("criterios", []), ["criterio", "AD", "A", "B", "C"], f"rub_ed_{sdoc['id']}_{ver}", {
-#|         "criterio": st.column_config.TextColumn("Criterio", width="medium"),
-#|         "AD": st.column_config.TextColumn("AD · Destacado", width="medium"),
-#|         "A": st.column_config.TextColumn("A · Esperado", width="medium"),
-#|         "B": st.column_config.TextColumn("B · En proceso", width="medium"),
-#|         "C": st.column_config.TextColumn("C · En inicio", width="medium")})
-#|     if st.button("💾 Guardar rúbrica", type="primary", key=f"rub_save_{sdoc['id']}"):
-#|         filas = [{k: s(r[k]) for k in ("criterio", "AD", "A", "B", "C")} for _, r in ed.iterrows() if s(r["criterio"])]
-#|         guardar_doc(uid, aid, "rubrica", 1, doc["titulo"], {"criterios": filas}, padre_id=sdoc["id"])
-#|         st.success("Rúbrica guardada ✅")
-#|     st.divider()
-#|     vista_previa_y_descarga(doc["id"], f"rub_{sdoc['id']}", abierta=False)
+#|     vista_previa_y_descarga(doc["id"], f"rub_{sdoc['id']}")
+#|     with st.expander("✏️ Editar la rúbrica"):
+#|         clave = f"rub_{sdoc['id']}_{ver}"
+#|         items = d.get("criterios", [])
+#|         editor_items(clave, items, CAMPOS_RUBRICA, lambda i, x: f"Criterio {i + 1}: {s(x.get('criterio'))[:60]}")
+#|         barra_edicion(clave, items, CAMPOS_RUBRICA,
+#|                       lambda n: {"numero": n, "criterio": "", "AD": "", "A": "", "B": "", "C": ""},
+#|                       lambda lista: guardar_doc(uid, aid, "rubrica", 1, doc["titulo"], {"criterios": lista}, padre_id=sdoc["id"]),
+#|                       ver_key)
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # FICHA DE TRABAJO
+#| # ------------------------------------------------------------------
+#| CAMPOS_FICHA = [{"k": "consigna", "label": "Consigna", "tipo": "area", "alto": 90},
+#|                 {"k": "respuesta", "label": "Respuesta esperada (solo para el docente)", "tipo": "linea"}]
 #|
 #|
 #| def _tab_ficha(asig, sdoc):
@@ -4255,49 +4475,58 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     d = contenido(doc) if doc else {}
 #|     ver_key = f"ver_fic_{sdoc['id']}"
 #|     ver = st.session_state.get(ver_key, 0)
-#|     n_act = st.number_input("Número de actividades", 3, 12, 6, key=f"fic_n_{sdoc['id']}")
-#|     if confirmar("ficha", "✨ Generar ficha con IA" if not doc else "🔄 Volver a generar la ficha", f"fic_{sdoc['id']}", asig=asig):
-#|         try:
-#|             prompt = f"""{preambulo()}
+#|     with st.expander("⚙️ Generar con IA", expanded=not doc):
+#|         n_act = st.number_input("Número de actividades", 3, 12, 6, key=f"fic_n_{sdoc['id']}")
+#|         if confirmar("ficha", "✨ Generar ficha con IA" if not doc else "🔄 Volver a generar la ficha",
+#|                      f"fic_{sdoc['id']}", asig=asig):
+#|             try:
+#|                 prompt = f"""{preambulo()}
 #| Elabora una FICHA DE TRABAJO para estudiantes de {asig['grado']} ({asig['nivel']}), área {asig['area']}, región {asig['region']}.
 #| Sesión: {sd.get('titulo')}. Propósito: {sd.get('proposito')}
 #| Competencias y criterios:
 #| {_resumen_competencias(sd)}
 #| Entrega {int(n_act)} actividades graduadas (de lo simple a lo complejo), con lenguaje adecuado a la edad y contexto cercano a la región. Cada actividad incluye la respuesta esperada para el docente.
 #| Formato: {{"titulo":"...","instrucciones":"...","actividades":[{{"numero":1,"consigna":"...","respuesta":"..."}}]}}"""
-#|             with st.spinner("Creando la ficha..."):
-#|                 ia, _ = pedir_json(prompt)
-#|             acts = [{"numero": i, "consigna": s(a.get("consigna")), "respuesta": s(a.get("respuesta"))}
-#|                     for i, a in enumerate((ia.get("actividades") if isinstance(ia, dict) else []) or [], 1) if isinstance(a, dict)]
-#|             if not acts:
-#|                 raise RuntimeError("La IA no devolvió actividades. Intenta de nuevo.")
-#|             guardar_doc(uid, aid, "ficha", 1, f"Ficha: {sd.get('titulo')}",
-#|                         {"titulo": s(ia.get("titulo")), "instrucciones": s(ia.get("instrucciones")), "actividades": acts},
-#|                         padre_id=sdoc["id"], normativa=normativa_vigente()[1])
-#|             cobrar(uid, "ficha")
-#|             siguiente_version(ver_key)
-#|             flash("Ficha lista ✅")
-#|             st.rerun()
-#|         except Exception as e:
-#|             st.error(f"No se pudo generar: {e}")
+#|                 with st.spinner("Creando la ficha..."):
+#|                     ia, _ = pedir_json(prompt)
+#|                 acts = [{"numero": i, "consigna": s(a.get("consigna")), "respuesta": s(a.get("respuesta"))}
+#|                         for i, a in enumerate((ia.get("actividades") if isinstance(ia, dict) else []) or [], 1) if isinstance(a, dict)]
+#|                 if not acts:
+#|                     raise RuntimeError("La IA no devolvió actividades. Intenta de nuevo.")
+#|                 guardar_doc(uid, aid, "ficha", 1, f"Ficha: {sd.get('titulo')}",
+#|                             {"titulo": s(ia.get("titulo")), "instrucciones": s(ia.get("instrucciones")), "actividades": acts},
+#|                             padre_id=sdoc["id"], normativa=normativa_vigente()[1])
+#|                 cobrar(uid, "ficha")
+#|                 siguiente_version(ver_key)
+#|                 flash("Ficha lista ✅")
+#|                 st.rerun()
+#|             except Exception as e:
+#|                 st.error(f"No se pudo generar: {e}")
 #|     if not doc:
 #|         return
-#|     base = f"fic_{sdoc['id']}_{ver}"
-#|     campo_linea("Título de la ficha", f"{base}_t", d.get("titulo", ""))
-#|     campo_texto("Indicaciones", f"{base}_i", d.get("instrucciones", ""), 80)
-#|     ed = _tabla(d.get("actividades", []), ["numero", "consigna", "respuesta"], f"{base}_ed", {
-#|         "numero": st.column_config.NumberColumn("N.°", step=1),
-#|         "consigna": st.column_config.TextColumn("Consigna", width="large"),
-#|         "respuesta": st.column_config.TextColumn("Respuesta esperada (docente)", width="medium")})
-#|     if st.button("💾 Guardar ficha", type="primary", key=f"fic_save_{sdoc['id']}"):
-#|         acts = [{"numero": k, "consigna": s(r["consigna"]), "respuesta": s(r["respuesta"])}
-#|                 for k, (_, r) in enumerate(ed.iterrows(), 1) if s(r["consigna"])]
-#|         guardar_doc(uid, aid, "ficha", 1, doc["titulo"],
-#|                     {"titulo": st.session_state.get(f"{base}_t", ""), "instrucciones": st.session_state.get(f"{base}_i", ""),
-#|                      "actividades": acts}, padre_id=sdoc["id"])
-#|         st.success("Ficha guardada ✅")
-#|     st.divider()
-#|     vista_previa_y_descarga(doc["id"], f"fic_{sdoc['id']}", abierta=False)
+#|     vista_previa_y_descarga(doc["id"], f"fic_{sdoc['id']}")
+#|     with st.expander("✏️ Editar la ficha"):
+#|         clave = f"fic_{sdoc['id']}_{ver}"
+#|         campo_linea("Título de la ficha", f"{clave}_t", d.get("titulo", ""))
+#|         campo_texto("Indicaciones", f"{clave}_i", d.get("instrucciones", ""), 80)
+#|         items = d.get("actividades", [])
+#|         editor_items(clave, items, CAMPOS_FICHA, lambda i, x: f"Actividad {i + 1}: {s(x.get('consigna'))[:60]}")
+#|         barra_edicion(clave, items, CAMPOS_FICHA, lambda n: {"numero": n, "consigna": "", "respuesta": ""},
+#|                       lambda lista: guardar_doc(uid, aid, "ficha", 1, doc["titulo"],
+#|                                                 {"titulo": st.session_state.get(f"{clave}_t", ""),
+#|                                                  "instrucciones": st.session_state.get(f"{clave}_i", ""),
+#|                                                  "actividades": lista}, padre_id=sdoc["id"]), ver_key)
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # EXAMEN DE LA SESIÓN
+#| # ------------------------------------------------------------------
+#| CAMPOS_EXAMEN = [{"k": "tipo", "label": "Tipo de pregunta", "tipo": "select",
+#|                   "opciones": ["opcion_multiple", "desarrollo", "verdadero_falso"]},
+#|                  {"k": "enunciado", "label": "Pregunta", "tipo": "area", "alto": 80},
+#|                  {"k": "opciones", "label": "Alternativas (una por línea, ej.: a) …)", "tipo": "lineas", "alto": 100},
+#|                  {"k": "respuesta", "label": "Respuesta correcta", "tipo": "linea"},
+#|                  {"k": "puntaje", "label": "Puntaje", "tipo": "linea"}]
 #|
 #|
 #| def _tab_examen(asig, sdoc):
@@ -4309,13 +4538,15 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     d = contenido(doc) if doc else {}
 #|     ver_key = f"ver_exa_{sdoc['id']}"
 #|     ver = st.session_state.get(ver_key, 0)
-#|     c1, c2, c3 = st.columns(3)
-#|     n_preg = c1.number_input("Número de preguntas", 3, 20, 8, key=f"exa_n_{sdoc['id']}")
-#|     tipos = c2.selectbox("Tipo de preguntas", ["Mixto", "Solo opción múltiple", "Solo desarrollo"], key=f"exa_t_{sdoc['id']}")
-#|     total = c3.number_input("Puntaje total", 5, 100, 20, key=f"exa_p_{sdoc['id']}")
-#|     if confirmar("examen", "✨ Generar examen con IA" if not doc else "🔄 Volver a generar el examen", f"exa_{sdoc['id']}", asig=asig):
-#|         try:
-#|             prompt = f"""{preambulo()}
+#|     with st.expander("⚙️ Generar con IA", expanded=not doc):
+#|         c1, c2, c3 = st.columns(3)
+#|         n_preg = c1.number_input("Número de preguntas", 3, 20, 8, key=f"exa_n_{sdoc['id']}")
+#|         tipos = c2.selectbox("Tipo de preguntas", ["Mixto", "Solo opción múltiple", "Solo desarrollo"], key=f"exa_t_{sdoc['id']}")
+#|         total = c3.number_input("Puntaje total", 5, 100, 20, key=f"exa_p_{sdoc['id']}")
+#|         if confirmar("examen", "✨ Generar examen con IA" if not doc else "🔄 Volver a generar el examen",
+#|                      f"exa_{sdoc['id']}", asig=asig):
+#|             try:
+#|                 prompt = f"""{preambulo()}
 #| Elabora un EXAMEN para estudiantes de {asig['grado']} ({asig['nivel']}), área {asig['area']}.
 #| Sesión: {sd.get('titulo')}
 #| Competencias y criterios:
@@ -4323,58 +4554,54 @@ elif pagina == PAG_ADMIN and es_admin:
 #| Número de preguntas: {int(n_preg)}. Tipo: {tipos}. Puntaje total: {int(total)} (los puntajes de las preguntas deben sumar exactamente {int(total)}).
 #| Para "opcion_multiple": 4 opciones escritas como "a) ...", "b) ...", y "respuesta" con la letra correcta. Para "desarrollo": "opciones" vacía y "respuesta" con la respuesta esperada.
 #| Formato: {{"titulo":"...","instrucciones":"...","preguntas":[{{"numero":1,"tipo":"opcion_multiple","enunciado":"...","opciones":["a) ...","b) ...","c) ...","d) ..."],"respuesta":"b","puntaje":2}}]}}"""
-#|             with st.spinner("Creando el examen..."):
-#|                 ia, _ = pedir_json(prompt)
-#|             pregs = []
-#|             for i, p in enumerate((ia.get("preguntas") if isinstance(ia, dict) else []) or [], 1):
-#|                 if isinstance(p, dict):
-#|                     pregs.append({"numero": i, "tipo": s(p.get("tipo")) or "desarrollo", "enunciado": s(p.get("enunciado")),
-#|                                   "opciones": a_lista(p.get("opciones")), "respuesta": s(p.get("respuesta")),
-#|                                   "puntaje": s(p.get("puntaje")) or "1"})
-#|             if not pregs:
-#|                 raise RuntimeError("La IA no devolvió preguntas. Intenta de nuevo.")
-#|             guardar_doc(uid, aid, "examen", 1, f"Examen: {sd.get('titulo')}",
-#|                         {"titulo": s(ia.get("titulo")), "instrucciones": s(ia.get("instrucciones")), "preguntas": pregs},
-#|                         padre_id=sdoc["id"], normativa=normativa_vigente()[1])
-#|             cobrar(uid, "examen")
-#|             siguiente_version(ver_key)
-#|             flash("Examen listo ✅")
-#|             st.rerun()
-#|         except Exception as e:
-#|             st.error(f"No se pudo generar: {e}")
+#|                 with st.spinner("Creando el examen..."):
+#|                     ia, _ = pedir_json(prompt)
+#|                 pregs = []
+#|                 for i, p in enumerate((ia.get("preguntas") if isinstance(ia, dict) else []) or [], 1):
+#|                     if isinstance(p, dict):
+#|                         pregs.append({"numero": i, "tipo": s(p.get("tipo")) or "desarrollo", "enunciado": s(p.get("enunciado")),
+#|                                       "opciones": a_lista(p.get("opciones")), "respuesta": s(p.get("respuesta")),
+#|                                       "puntaje": s(p.get("puntaje")) or "1"})
+#|                 if not pregs:
+#|                     raise RuntimeError("La IA no devolvió preguntas. Intenta de nuevo.")
+#|                 guardar_doc(uid, aid, "examen", 1, f"Examen: {sd.get('titulo')}",
+#|                             {"titulo": s(ia.get("titulo")), "instrucciones": s(ia.get("instrucciones")), "preguntas": pregs},
+#|                             padre_id=sdoc["id"], normativa=normativa_vigente()[1])
+#|                 cobrar(uid, "examen")
+#|                 siguiente_version(ver_key)
+#|                 flash("Examen listo ✅")
+#|                 st.rerun()
+#|             except Exception as e:
+#|                 st.error(f"No se pudo generar: {e}")
 #|     if not doc:
 #|         return
-#|     base = f"exa_{sdoc['id']}_{ver}"
-#|     campo_linea("Título del examen", f"{base}_t", d.get("titulo", ""))
-#|     campo_texto("Indicaciones", f"{base}_i", d.get("instrucciones", ""), 80)
-#|     filas = [{"numero": p.get("numero"), "tipo": p.get("tipo"), "enunciado": p.get("enunciado"),
-#|               "opciones": " | ".join(p.get("opciones") or []), "respuesta": p.get("respuesta"), "puntaje": p.get("puntaje")}
-#|              for p in d.get("preguntas", [])]
-#|     ed = _tabla(filas, ["numero", "tipo", "enunciado", "opciones", "respuesta", "puntaje"], f"{base}_ed", {
-#|         "numero": st.column_config.NumberColumn("N.°", step=1),
-#|         "tipo": st.column_config.SelectboxColumn("Tipo", options=["opcion_multiple", "desarrollo", "verdadero_falso"]),
-#|         "enunciado": st.column_config.TextColumn("Enunciado", width="large"),
-#|         "opciones": st.column_config.TextColumn("Opciones (separadas por |)", width="large"),
-#|         "respuesta": st.column_config.TextColumn("Respuesta"),
-#|         "puntaje": st.column_config.TextColumn("Puntaje")})
-#|     if st.button("💾 Guardar examen", type="primary", key=f"exa_save_{sdoc['id']}"):
-#|         pregs = []
-#|         for k, (_, r) in enumerate(ed.iterrows(), 1):
-#|             if s(r["enunciado"]):
-#|                 pregs.append({"numero": k, "tipo": s(r["tipo"]) or "desarrollo", "enunciado": s(r["enunciado"]),
-#|                               "opciones": [x.strip() for x in s(r["opciones"]).split("|") if x.strip()],
-#|                               "respuesta": s(r["respuesta"]), "puntaje": s(r["puntaje"]) or "1"})
-#|         guardar_doc(uid, aid, "examen", 1, doc["titulo"],
-#|                     {"titulo": st.session_state.get(f"{base}_t", ""), "instrucciones": st.session_state.get(f"{base}_i", ""),
-#|                      "preguntas": pregs}, padre_id=sdoc["id"])
-#|         st.success("Examen guardado ✅")
-#|     st.divider()
-#|     vista_previa_y_descarga(doc["id"], f"exa_{sdoc['id']}", abierta=False)
+#|     vista_previa_y_descarga(doc["id"], f"exa_{sdoc['id']}")
+#|     with st.expander("✏️ Editar el examen"):
+#|         clave = f"exa_{sdoc['id']}_{ver}"
+#|         campo_linea("Título del examen", f"{clave}_t", d.get("titulo", ""))
+#|         campo_texto("Indicaciones", f"{clave}_i", d.get("instrucciones", ""), 80)
+#|         items = d.get("preguntas", [])
+#|         editor_items(clave, items, CAMPOS_EXAMEN, lambda i, x: f"Pregunta {i + 1}: {s(x.get('enunciado'))[:60]}")
+#|         barra_edicion(clave, items, CAMPOS_EXAMEN,
+#|                       lambda n: {"numero": n, "tipo": "desarrollo", "enunciado": "", "opciones": [], "respuesta": "", "puntaje": "1"},
+#|                       lambda lista: guardar_doc(uid, aid, "examen", 1, doc["titulo"],
+#|                                                 {"titulo": st.session_state.get(f"{clave}_t", ""),
+#|                                                  "instrucciones": st.session_state.get(f"{clave}_i", ""),
+#|                                                  "preguntas": lista}, padre_id=sdoc["id"]), ver_key)
 #|
 #|
 #| # ------------------------------------------------------------------
 #| # DESAFÍOS DE APRENDIZAJE (por clase o por unidad)
 #| # ------------------------------------------------------------------
+#| CAMPOS_DESAFIO = [{"k": "nombre", "label": "Nombre del desafío", "tipo": "linea"},
+#|                   {"k": "nivel", "label": "Nivel", "tipo": "select", "opciones": ["Básico", "Intermedio", "Avanzado"]},
+#|                   {"k": "puntos", "label": "Puntos", "tipo": "linea"},
+#|                   {"k": "reto", "label": "El reto", "tipo": "area", "alto": 90},
+#|                   {"k": "pasos", "label": "Pasos (uno por línea)", "tipo": "lineas", "alto": 90},
+#|                   {"k": "producto", "label": "Producto que presentarán", "tipo": "linea"},
+#|                   {"k": "criterios", "label": "Lo lograrás si… (uno por línea)", "tipo": "lineas", "alto": 80}]
+#|
+#|
 #| def _contexto_desafio(padre, udata, ambito):
 #|     d = contenido(padre)
 #|     if ambito == "unidad":
@@ -4398,62 +4625,53 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     ver = st.session_state.get(ver_key, 0)
 #|     st.caption("Retos motivadores para tus estudiantes, basados en el tema y en los desempeños oficiales. "
 #|                "Incluyen pasos, producto, criterios de logro y una hoja de seguimiento.")
-#|     c1, c2 = st.columns(2)
-#|     n = c1.number_input("Número de desafíos", 3, 10, 5, key=f"des_n_{padre['id']}")
-#|     modalidad = c2.selectbox("Modalidad", ["Mixto", "Individual", "En equipos"], key=f"des_m_{padre['id']}")
-#|     if confirmar("desafio", "✨ Crear desafíos con IA" if not doc else "🔄 Volver a crear los desafíos",
-#|                  f"des_{padre['id']}", asig=asig):
-#|         try:
-#|             prompt = f"""{preambulo()}
+#|     with st.expander("⚙️ Generar con IA", expanded=not doc):
+#|         c1, c2 = st.columns(2)
+#|         n = c1.number_input("Número de desafíos", 3, 10, 5, key=f"des_n_{padre['id']}")
+#|         modalidad = c2.selectbox("Modalidad", ["Mixto", "Individual", "En equipos"], key=f"des_m_{padre['id']}")
+#|         if confirmar("desafio", "✨ Crear desafíos con IA" if not doc else "🔄 Volver a crear los desafíos",
+#|                      f"des_{padre['id']}", asig=asig):
+#|             try:
+#|                 prompt = f"""{preambulo()}
 #| Crea DESAFÍOS DE APRENDIZAJE para estudiantes de {asig['grado']} ({asig['nivel']}), área {asig['area']}, región {asig['region']}.
 #| {_contexto_desafio(padre, udata, ambito)}
 #| Número de desafíos: {int(n)}. Modalidad: {modalidad}.
 #| Cada desafío es un reto motivador y contextualizado que hace que el estudiante use lo aprendido, con dificultad creciente (Básico, Intermedio, Avanzado).
 #| Formato: {{"titulo":"...","introduccion":"mensaje motivador para los estudiantes","desafios":[{{"numero":1,"nombre":"...","reto":"...","pasos":["..."],"producto":"...","criterios":["..."],"nivel":"Básico","puntos":5}}]}}"""
-#|             with st.spinner("Creando los desafíos..."):
-#|                 ia, _ = pedir_json(prompt)
-#|             lista = [x for x in (ia.get("desafios") if isinstance(ia, dict) else []) or [] if isinstance(x, dict)]
-#|             if not lista:
-#|                 raise RuntimeError("La IA no devolvió desafíos. Intenta de nuevo.")
-#|             desafios = [{"numero": i, "nombre": s(x.get("nombre")), "reto": s(x.get("reto")), "pasos": a_lista(x.get("pasos")),
-#|                          "producto": s(x.get("producto")), "criterios": a_lista(x.get("criterios")),
-#|                          "nivel": s(x.get("nivel")), "puntos": s(x.get("puntos"))} for i, x in enumerate(lista, 1)]
-#|             guardar_doc(uid, aid, "desafio", 1, s(ia.get("titulo")) or f"Desafíos: {contenido(padre).get('titulo')}",
-#|                         {"titulo": s(ia.get("titulo")), "introduccion": s(ia.get("introduccion")),
-#|                          "modalidad": modalidad, "desafios": desafios}, padre_id=padre["id"],
-#|                         normativa=normativa_vigente()[1])
-#|             cobrar(uid, "desafio")
-#|             siguiente_version(ver_key)
-#|             flash("¡Desafíos listos! Revísalos y ajústalos.")
-#|             st.rerun()
-#|         except Exception as e:
-#|             st.error(f"No se pudo generar: {e}")
+#|                 with st.spinner("Creando los desafíos..."):
+#|                     ia, _ = pedir_json(prompt)
+#|                 lista = [x for x in (ia.get("desafios") if isinstance(ia, dict) else []) or [] if isinstance(x, dict)]
+#|                 if not lista:
+#|                     raise RuntimeError("La IA no devolvió desafíos. Intenta de nuevo.")
+#|                 desafios = [{"numero": i, "nombre": s(x.get("nombre")), "reto": s(x.get("reto")), "pasos": a_lista(x.get("pasos")),
+#|                              "producto": s(x.get("producto")), "criterios": a_lista(x.get("criterios")),
+#|                              "nivel": s(x.get("nivel")), "puntos": s(x.get("puntos"))} for i, x in enumerate(lista, 1)]
+#|                 guardar_doc(uid, aid, "desafio", 1, s(ia.get("titulo")) or f"Desafíos: {contenido(padre).get('titulo')}",
+#|                             {"titulo": s(ia.get("titulo")), "introduccion": s(ia.get("introduccion")),
+#|                              "modalidad": modalidad, "desafios": desafios}, padre_id=padre["id"],
+#|                             normativa=normativa_vigente()[1])
+#|                 cobrar(uid, "desafio")
+#|                 siguiente_version(ver_key)
+#|                 flash("¡Desafíos listos! Descárgalos en Word o edítalos.")
+#|                 st.rerun()
+#|             except Exception as e:
+#|                 st.error(f"No se pudo generar: {e}")
 #|     if not doc:
 #|         return
-#|     base = f"des_{padre['id']}_{ver}"
-#|     campo_linea("Título", f"{base}_t", d.get("titulo", ""))
-#|     campo_texto("Mensaje para los estudiantes", f"{base}_i", d.get("introduccion", ""), 80)
-#|     filas = [{"numero": x.get("numero"), "nombre": x.get("nombre"), "reto": x.get("reto"),
-#|               "pasos (separados por |)": " | ".join(x.get("pasos") or []), "producto": x.get("producto"),
-#|               "criterios (separados por |)": " | ".join(x.get("criterios") or []), "nivel": x.get("nivel"),
-#|               "puntos": x.get("puntos")} for x in d.get("desafios", [])]
-#|     cols = ["numero", "nombre", "reto", "pasos (separados por |)", "producto", "criterios (separados por |)", "nivel", "puntos"]
-#|     ed = _tabla(filas, cols, f"{base}_ed")
-#|     if st.button("💾 Guardar desafíos", type="primary", key=f"des_save_{padre['id']}"):
-#|         lista = []
-#|         for k, (_, r) in enumerate(ed.iterrows(), 1):
-#|             if s(r["nombre"]) or s(r["reto"]):
-#|                 lista.append({"numero": k, "nombre": s(r["nombre"]), "reto": s(r["reto"]),
-#|                               "pasos": [x.strip() for x in s(r["pasos (separados por |)"]).split("|") if x.strip()],
-#|                               "producto": s(r["producto"]),
-#|                               "criterios": [x.strip() for x in s(r["criterios (separados por |)"]).split("|") if x.strip()],
-#|                               "nivel": s(r["nivel"]), "puntos": s(r["puntos"])})
-#|         guardar_doc(uid, aid, "desafio", 1, st.session_state.get(f"{base}_t", "") or doc["titulo"],
-#|                     {**d, "titulo": st.session_state.get(f"{base}_t", ""),
-#|                      "introduccion": st.session_state.get(f"{base}_i", ""), "desafios": lista}, padre_id=padre["id"])
-#|         st.success("Desafíos guardados ✅")
-#|     st.divider()
-#|     vista_previa_y_descarga(doc["id"], f"des_{padre['id']}", abierta=False)
+#|     vista_previa_y_descarga(doc["id"], f"des_{padre['id']}")
+#|     with st.expander("✏️ Editar los desafíos"):
+#|         clave = f"des_{padre['id']}_{ver}"
+#|         campo_linea("Título", f"{clave}_t", d.get("titulo", ""))
+#|         campo_texto("Mensaje para los estudiantes", f"{clave}_i", d.get("introduccion", ""), 80)
+#|         items = d.get("desafios", [])
+#|         editor_items(clave, items, CAMPOS_DESAFIO, lambda i, x: f"Desafío {i + 1}: {s(x.get('nombre'))[:50]}")
+#|         barra_edicion(clave, items, CAMPOS_DESAFIO,
+#|                       lambda n: {"numero": n, "nombre": "", "reto": "", "pasos": [], "producto": "", "criterios": [],
+#|                                  "nivel": "Básico", "puntos": "5"},
+#|                       lambda lista: guardar_doc(uid, aid, "desafio", 1, st.session_state.get(f"{clave}_t", "") or doc["titulo"],
+#|                                                 {**d, "titulo": st.session_state.get(f"{clave}_t", ""),
+#|                                                  "introduccion": st.session_state.get(f"{clave}_i", ""),
+#|                                                  "desafios": lista}, padre_id=padre["id"]), ver_key)
 #@@ END
 #@@ MODULE v_biblioteca
 #| """Mi Biblioteca: todos tus documentos ordenados por área y grado."""
@@ -4461,9 +4679,9 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #| from db import fetch
 #| from exportar import bloques_de
-#| from repo import borrar_doc, get_asignacion, listar_asignaciones, listar_docs
+#| from repo import borrar_doc, docs_del_usuario, get_doc_by_id, listar_asignaciones
 #| from render import COLOR_DEFECTO, a_docx, texto_a_docx
-#| from ui import MIME_DOCX, PAG_ANUAL, PAG_SESIONES, PAG_UNIDADES, abrir_area, flash
+#| from ui import MIME_DOCX, PAG_ANUAL, PAG_SESIONES, PAG_UNIDADES, abrir_area, descargar, flash
 #|
 #| TIPOS = {"anual": ("📅", "Planificación anual", PAG_ANUAL), "unidad": ("📚", "Unidad", PAG_UNIDADES),
 #|          "sesion": ("📝", "Sesión", PAG_SESIONES), "rubrica": ("📊", "Rúbrica", PAG_SESIONES),
@@ -4482,8 +4700,9 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         st.info("Cuando crees documentos aparecerán aquí.")
 #|     filtro = st.selectbox("Mostrar", ["Todos los documentos"] + list(TIPOS), key="bib_filtro",
 #|                           format_func=lambda k: k if k.startswith("Todos") else f"{TIPOS[k][0]} {TIPOS[k][1]}")
+#|     todos = docs_del_usuario(uid)
 #|     for a in asigs:
-#|         docs = listar_docs(a["id"], None if filtro.startswith("Todos") else filtro)
+#|         docs = [d for d in todos if d["asignacion_id"] == a["id"] and (filtro.startswith("Todos") or d["tipo"] == filtro)]
 #|         docs.sort(key=lambda d: (ORDEN.get(d["tipo"], 9), d["numero"], d["id"]))
 #|         titulo = f"{a['area']} · {a['grado']} · Sección {a['seccion'] or '—'}  ({len(docs)} documentos)"
 #|         with st.expander(titulo, expanded=len(asigs) == 1):
@@ -4496,12 +4715,13 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                 c1.caption(f"Actualizado: {d['actualizado_en']:%d/%m/%Y %H:%M}")
 #|                 kb = f"bib_bytes_{d['id']}"
 #|                 if c2.button("📄 Preparar Word", key=f"prep_{d['id']}"):
-#|                     bloques, horizontal, archivo = bloques_de(d)
+#|                     completo = get_doc_by_id(d["id"])
+#|                     bloques, horizontal, archivo = bloques_de(completo)
 #|                     st.session_state[kb] = (a_docx(bloques, d.get("color") or COLOR_DEFECTO, d.get("normativa_usada"),
 #|                                                    horizontal), archivo)
 #|                 if kb in st.session_state:
 #|                     datos, archivo = st.session_state[kb]
-#|                     c2.download_button("⬇️ Descargar", data=datos, file_name=archivo, mime=MIME_DOCX, key=f"dlb_{d['id']}")
+#|                     descargar("⬇️ Descargar", datos, archivo, MIME_DOCX, f"dlb_{d['id']}")
 #|                 c3.button("Abrir curso", key=f"op_{d['id']}", on_click=abrir_area, args=(a["id"], pagina))
 #|                 if c4.button("🗑️", key=f"del_{d['id']}", help="Eliminar (también lo que depende de él)"):
 #|                     st.session_state[f"_del_{d['id']}"] = True
@@ -4523,8 +4743,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         with st.expander(f"🕰️ Documentos del generador anterior ({len(antiguos)})"):
 #|             for d in antiguos:
 #|                 st.markdown(f"**{d['titulo']}** · {d['creado_en']:%d/%m/%Y}")
-#|                 st.download_button("⬇️ Word", data=texto_a_docx(d["titulo"], d["contenido_texto"], d["normativa_usada"]),
-#|                                    file_name=f"documento_{d['id']}.docx", mime=MIME_DOCX, key=f"old_{d['id']}")
+#|                 descargar("⬇️ Word", texto_a_docx(d["titulo"], d["contenido_texto"], d["normativa_usada"]),
+#|                           f"documento_{d['id']}.docx", MIME_DOCX, f"old_{d['id']}")
 #@@ END
 #@@ MODULE v_admin
 #| """Administración: resumen, usuarios, colegios, currículo, normativa MINEDU y costos."""
@@ -4541,7 +4761,15 @@ elif pagina == PAG_ADMIN and es_admin:
 #| from normativa import revisar_fuente
 #| from repo import COSTOS_DEFAULT, NOMBRES_COSTO, config_get, config_set, costo_de, mapa_colegios
 #| from util import a_lista, entero, norm, s
+#| import time
+#|
+#| import requests
+#|
 #| import v_programas
+#| from db import medir_latencia
+#| from ia import llamar_gemini, llamar_openrouter
+#| from programas import PORTALES
+#| from ui import descargar
 #|
 #| ROLES = ["docente", "director", "admin"]
 #| TIPOS_NORMA = ["curricular", "pedagógico/normativo", "administrativo"]
@@ -4549,7 +4777,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #| def render(admin_id):
 #|     st.title("⚙️ Administración")
-#|     t = st.tabs(["📊 Resumen", "👥 Usuarios", "🏫 Colegios", "🎓 Currículo", "📜 Normativa MINEDU", "🎟️ Costos"])
+#|     t = st.tabs(["📊 Resumen", "👥 Usuarios", "🏫 Colegios", "🎓 Currículo", "📜 Normativa MINEDU", "🎟️ Costos",
+#|                  "🩺 Diagnóstico"])
 #|     with t[0]:
 #|         panel_resumen()
 #|     with t[1]:
@@ -4562,6 +4791,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         panel_normativa(admin_id)
 #|     with t[5]:
 #|         panel_costos()
+#|     with t[6]:
+#|         panel_diagnostico()
 #|
 #|
 #| # ------------------------------------------------------------------
@@ -4838,8 +5069,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                "Si la competencia no existe, se crea (sin verificar).")
 #|     plantilla = pd.DataFrame([{"nivel": "Primaria", "area": "Matemática", "competencia": "Resuelve problemas de cantidad",
 #|                                "grado": "3.° grado", "desempeno": "Escribe aquí el desempeño oficial..."}])
-#|     st.download_button("⬇️ Descargar plantilla (CSV)", plantilla.to_csv(index=False).encode("utf-8-sig"),
-#|                        file_name="plantilla_desempenos.csv", mime="text/csv", key="cur_plantilla")
+#|     descargar("⬇️ Descargar plantilla (CSV)", plantilla.to_csv(index=False).encode("utf-8-sig"),
+#|               "plantilla_desempenos.csv", "text/csv", "cur_plantilla")
 #|     archivo = st.file_uploader("Archivo", type=["csv", "xlsx"], key="cur_archivo")
 #|     reemplazar = st.checkbox("Reemplazar los desempeños existentes de cada competencia/grado del archivo", value=False)
 #|     if archivo is not None and st.button("📥 Importar", type="primary", key="cur_importar_btn"):
@@ -4968,4 +5199,68 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         for clave, v in valores.items():
 #|             config_set(f"costo_{clave}", int(v))
 #|         st.success("Costos guardados ✅")
+#|
+#|
+#| # ------------------------------------------------------------------
+#| def panel_diagnostico():
+#|     st.subheader("Diagnóstico del sistema")
+#|     st.caption("Comprueba en un clic la velocidad de la base de datos, las claves de IA, las tablas y el acceso al MINEDU.")
+#|     if not st.button("▶️ Ejecutar pruebas", type="primary", key="diag_run"):
+#|         return
+#|     filas = []
+#|
+#|     def probar(nombre, fn):
+#|         t0 = time.time()
+#|         try:
+#|             estado, detalle = fn()
+#|         except Exception as e:
+#|             estado, detalle = "❌", f"{type(e).__name__}: {e}"
+#|         filas.append((estado, nombre, detalle, f"{(time.time() - t0) * 1000:.0f} ms"))
+#|
+#|     def _bd():
+#|         ms = medir_latencia(5)
+#|         if ms < 120:
+#|             return "✅", f"{ms:.0f} ms por consulta: buena velocidad."
+#|         return "⚠️", (f"{ms:.0f} ms por consulta: es lento. Tu base de Aiven probablemente está lejos de Streamlit Cloud; "
+#|                      "crea el servicio de Aiven en una región de EE. UU. (la misma zona de Google Cloud) para ganar velocidad.")
+#|
+#|     def _tablas():
+#|         existentes = {f["TABLE_NAME"] if "TABLE_NAME" in f else list(f.values())[0]
+#|                       for f in db_fetch("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()")}
+#|         necesarias = {"usuarios", "asignaciones", "documentos", "curriculo_competencias", "curriculo_desempenos",
+#|                       "eventos", "config", "normativa_versiones"}
+#|         faltan = necesarias - {x.lower() for x in existentes}
+#|         return ("✅", "Todas las tablas existen.") if not faltan else ("❌", "Faltan tablas: " + ", ".join(sorted(faltan)))
+#|
+#|     def _secrets():
+#|         faltan = [x for x in ("mysql", "admin", "openrouter", "gemini") if x not in st.secrets]
+#|         return ("✅", "Secrets completos.") if not faltan else ("⚠️", "Faltan secciones en Secrets: " + ", ".join(faltan))
+#|
+#|     def _or():
+#|         if "openrouter" not in st.secrets:
+#|             return "⚠️", "No hay [openrouter] en Secrets."
+#|         return "✅", "Respondió: " + llamar_openrouter("Responde solo con la palabra: ok")[:40]
+#|
+#|     def _gem():
+#|         if "gemini" not in st.secrets:
+#|             return "⚠️", "No hay [gemini] en Secrets."
+#|         return "✅", "Respondió: " + llamar_gemini("Responde solo con la palabra: ok")[:40]
+#|
+#|     def _minedu():
+#|         r = requests.get(PORTALES[0], timeout=25, headers={"User-Agent": "Mozilla/5.0"})
+#|         return ("✅", f"gob.pe respondió ({r.status_code}).") if r.status_code < 400 else ("⚠️", f"gob.pe respondió {r.status_code}.")
+#|
+#|     def _libs():
+#|         import docx, pypdf  # noqa: F401
+#|         return "✅", "python-docx y pypdf instalados."
+#|
+#|     probar("Velocidad de la base de datos", _bd)
+#|     probar("Tablas de la base de datos", _tablas)
+#|     probar("Secrets (claves)", _secrets)
+#|     probar("IA principal: OpenRouter", _or)
+#|     probar("IA de respaldo: Gemini", _gem)
+#|     probar("Acceso a gob.pe (MINEDU)", _minedu)
+#|     probar("Librerías de Word y PDF", _libs)
+#|     for estado, nombre, detalle, tiempo in filas:
+#|         st.markdown(f"{estado} **{nombre}** · {tiempo}  \n{detalle}")
 #@@ END
