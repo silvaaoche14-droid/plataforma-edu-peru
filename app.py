@@ -3,18 +3,25 @@
 Este archivo contiene TODO el sistema: arriba está el cargador y la aplicación principal, y al final
 (bloques que empiezan con «#@@ MODULE») el código de cada módulo. No borres esos bloques.
 """
+import hashlib
 import linecache
 import sys
 import types
+
+import streamlit as st
 
 _ORDEN = ['util', 'db', 'repo', 'curriculo', 'render', 'exportar', 'ia', 'normativa', 'programas', 'lineamientos', 'calendario', 'auth', 'ui', 'examen_unidad', 'v_curriculo', 'v_programas', 'v_calendario', 'v_panel', 'v_anual', 'v_unidades', 'v_sesiones', 'v_biblioteca', 'v_admin']
 
 
 def _cargar_modulos():
+    """Carga los módulos del final de este archivo.
+    - Si cambiaste app.py, recarga todo (no quedan módulos viejos en memoria).
+    - Si un módulo falla, descarta lo cargado a medias y dice cuál falló y por qué."""
     with open(__file__, encoding="utf-8") as f:
-        lineas = f.read().split("\n")
+        texto = f.read()
+    version = hashlib.md5(texto.encode("utf-8")).hexdigest()[:12]
     bloques, actual = {}, None
-    for linea in lineas:
+    for linea in texto.split("\n"):
         if linea.startswith("#@@ MODULE "):
             actual = linea[len("#@@ MODULE "):].strip()
             bloques[actual] = []
@@ -22,19 +29,32 @@ def _cargar_modulos():
             actual = None
         elif actual is not None and linea.startswith("#|"):
             bloques[actual].append(linea[3:] if len(linea) > 2 else "")
-    for nombre in _ORDEN:
-        if nombre in sys.modules:
-            continue
-        codigo = "\n".join(bloques[nombre]) + "\n"
-        archivo = f"<eduperu:{nombre}.py>"
-        linecache.cache[archivo] = (len(codigo), None, codigo.splitlines(True), archivo)
-        modulo = types.ModuleType(nombre)
-        modulo.__file__ = archivo
-        sys.modules[nombre] = modulo
-        exec(compile(codigo, archivo, "exec"), modulo.__dict__)
+    nuevos, nombre = [], ""
+    try:
+        for nombre in _ORDEN:
+            existente = sys.modules.get(nombre)
+            if existente is not None and getattr(existente, "__eduperu__", None) == version:
+                continue
+            codigo = "\n".join(bloques[nombre]) + "\n"
+            archivo = f"<eduperu:{nombre}.py>"
+            linecache.cache[archivo] = (len(codigo), None, codigo.splitlines(True), archivo)
+            modulo = types.ModuleType(nombre)
+            modulo.__file__ = archivo
+            modulo.__eduperu__ = version
+            sys.modules[nombre] = modulo
+            nuevos.append(nombre)
+            exec(compile(codigo, archivo, "exec"), modulo.__dict__)
+    except BaseException as e:
+        for n in nuevos:
+            sys.modules.pop(n, None)
+        raise ImportError(f"No se pudo cargar el módulo «{nombre}»: {type(e).__name__}: {e}") from e
 
 
-_cargar_modulos()
+try:
+    _cargar_modulos()
+except ImportError as _e:
+    st.error(f"⚠️ {_e}")
+    st.stop()
 
 # ======================= APLICACIÓN PRINCIPAL =======================
 
