@@ -58,6 +58,8 @@ except ImportError as _e:
 
 # ======================= APLICACIÓN PRINCIPAL =======================
 
+import html
+
 import streamlit as st
 
 st.set_page_config(page_title="EduPerú IA - Portal Docente", layout="wide", page_icon="✏️",
@@ -68,48 +70,72 @@ st.session_state["_memo"] = {}
 
 st.markdown("""
 <style>
-:root { --p1:#7c3aed; --p2:#c026d3; --acc:#f59e0b; }
-.main .block-container { padding-top: 1.2rem; padding-bottom: 3rem; max-width: 1200px; }
+:root { --p1:#7c3aed; --p2:#c026d3; --acc:#f59e0b; --ink:#1f2937; --suave:#6b7280; }
+.main .block-container { padding-top: 2rem; padding-bottom: 4rem; max-width: 1100px; }
+h1, h2, h3 { letter-spacing: -0.01em; }
+h2, h3 { margin-top: .6rem; }
+div[data-testid="stVerticalBlock"] { gap: 1rem; }
 div[data-testid="stForm"] { border: none; }
 
 /* sin el "muñequito" de carga ni la atenuación de la pantalla */
 [data-testid="stStatusWidget"] { display: none !important; }
 [data-stale="true"], .stApp [data-stale="true"] { opacity: 1 !important; transition: none !important; }
 
-/* barra lateral */
-[data-testid="stSidebar"] { background: linear-gradient(180deg, #faf5ff 0%, #ffffff 70%); border-right: 1px solid #efe7fb; }
-[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
-.brand { font-size: 1.45rem; font-weight: 800; background: linear-gradient(90deg, var(--p1), var(--p2));
-         -webkit-background-clip: text; background-clip: text; color: transparent; margin-bottom: .2rem; }
-.usercard { background: #fff; border: 1px solid #efe7fb; border-radius: 14px; padding: .6rem .8rem; margin: .4rem 0 .8rem;
-            box-shadow: 0 1px 4px rgba(124,58,237,.08); }
-.usercard b { font-size: .95rem; } .usercard span { font-size: .8rem; color: #6b7280; }
-.chip { display: inline-block; background: rgba(255,255,255,.22); color: #fff; border-radius: 999px; padding: .15rem .7rem;
-        font-size: .82rem; margin-top: .5rem; }
-.usercard .chip { background: #f3e8ff; color: #6d28d9; margin-top: .3rem; }
+/* ---------- barra lateral ---------- */
+[data-testid="stSidebar"] { background: linear-gradient(180deg, #f8f2ff 0%, #ffffff 65%); border-right: 1px solid #eee3fb; }
+[data-testid="stSidebar"] > div:first-child { padding: 1.2rem 1rem 1rem; }
+.brand { font-size: 1.5rem; font-weight: 800; background: linear-gradient(90deg, var(--p1), var(--p2));
+         -webkit-background-clip: text; background-clip: text; color: transparent; margin: .2rem 0 1rem .3rem; }
+.usercard { display: flex; align-items: center; gap: .75rem; background: #fff; border: 1px solid #efe7fb; border-radius: 18px;
+            padding: .8rem .9rem; margin-bottom: 1.2rem; box-shadow: 0 2px 10px rgba(124,58,237,.08); }
+.avatar { flex: 0 0 auto; width: 42px; height: 42px; border-radius: 50%; color: #fff; font-weight: 800; font-size: 1.1rem;
+          display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, var(--p1), var(--p2)); }
+.usercard .nombre { font-weight: 700; color: var(--ink); line-height: 1.2; }
+.usercard .rol { font-size: .74rem; color: var(--suave); }
+.chip { display: inline-block; border-radius: 999px; padding: .15rem .7rem; font-size: .8rem; margin-top: .25rem;
+        background: #f3e8ff; color: #6d28d9; font-weight: 600; }
+.menu-t { font-size: .72rem; letter-spacing: .14em; color: #a78bda; font-weight: 700; margin: .4rem 0 .5rem .5rem; }
 
-/* menú lateral */
-[data-testid="stSidebar"] div[role="radiogroup"] { gap: 3px; }
-[data-testid="stSidebar"] div[role="radiogroup"] > label { padding: .55rem .8rem; border-radius: 12px; width: 100%; cursor: pointer; }
+/* menú lateral: más aire, bordes suaves y el elegido resaltado */
+[data-testid="stSidebar"] div[role="radiogroup"] { gap: 6px; }
+[data-testid="stSidebar"] div[role="radiogroup"] > label { padding: .78rem 1rem; border-radius: 14px; width: 100%; cursor: pointer;
+                                                           transition: background .15s; }
+[data-testid="stSidebar"] div[role="radiogroup"] > label p { font-size: 1rem; margin: 0; }
 [data-testid="stSidebar"] div[role="radiogroup"] > label:hover { background: #f3e8ff; }
 [data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child { display: none; }
-[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) { background: linear-gradient(90deg, var(--p1), var(--p2)); }
+[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) {
+    background: linear-gradient(90deg, var(--p1), var(--p2)); box-shadow: 0 6px 16px rgba(124,58,237,.25); }
 [data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) * { color: #fff !important; font-weight: 600; }
+.pie-lateral { font-size: .74rem; color: #9ca3af; margin-top: .8rem; text-align: center; }
 
-/* bienvenida y tarjetas */
-.hero { background: linear-gradient(120deg, #7c3aed 0%, #c026d3 60%, #f59e0b 130%); color: #fff; border-radius: 20px;
-        padding: 1.4rem 1.6rem; margin-bottom: 1.2rem; box-shadow: 0 6px 20px rgba(124,58,237,.25); }
-.hero-t { font-size: 1.7rem; font-weight: 800; } .hero-s { opacity: .95; margin-top: .25rem; max-width: 760px; }
-div[data-testid="stVerticalBlockBorderWrapper"] { border-radius: 16px; }
-.tool-i { font-size: 2rem; line-height: 1; } .tool-t { font-weight: 700; margin-top: .3rem; }
-.tool-d { color: #6b7280; font-size: .84rem; min-height: 2.5rem; margin-bottom: .4rem; }
+/* ---------- banda de bienvenida (el botón va DENTRO) ---------- */
+.st-key-hero { background: linear-gradient(120deg, #7c3aed 0%, #c026d3 60%, #f59e0b 135%); border-radius: 24px;
+               padding: 1.8rem 2rem 1.5rem; box-shadow: 0 12px 30px rgba(124,58,237,.30); }
+.hero-t { font-size: 1.95rem; font-weight: 800; color: #fff; }
+.hero-s { color: #fff; opacity: .96; max-width: 720px; margin: .35rem 0 .7rem; line-height: 1.5; }
+.st-key-hero .chip { background: rgba(255,255,255,.22); color: #fff; }
+.st-key-hero button { background: #ffffff; border: 0; border-radius: 14px; font-weight: 700; padding: .55rem 1rem; }
+.st-key-hero button p, .st-key-hero button div { color: #6d28d9 !important; }
+.st-key-hero button:hover { filter: brightness(.96); }
 
-/* botones principales */
+/* ---------- tarjetas ---------- */
+[class*="st-key-card_"], [class*="st-key-curso_"], .st-key-continuar, .st-key-form_crear {
+    padding: 1.25rem 1.35rem !important; border-radius: 20px !important; background: #fff;
+    box-shadow: 0 2px 12px rgba(17,24,39,.06); transition: box-shadow .2s, transform .2s; }
+[class*="st-key-card_"]:hover, [class*="st-key-curso_"]:hover { box-shadow: 0 10px 26px rgba(124,58,237,.16); transform: translateY(-2px); }
+.tool-i { font-size: 2.2rem; line-height: 1; margin-bottom: .2rem; }
+.tool-t { font-weight: 700; font-size: 1.05rem; margin-top: .35rem; color: var(--ink); }
+.tool-d { color: var(--suave); font-size: .86rem; min-height: 2.6rem; margin: .2rem 0 .6rem; line-height: 1.4; }
+.curso-t { font-weight: 700; font-size: 1.08rem; color: var(--ink); }
+.curso-s { color: var(--suave); font-size: .86rem; margin: .15rem 0 .5rem; }
+.curso-p { font-size: .85rem; color: #4b5563; margin: .2rem 0 .8rem; }
+
+/* ---------- botones ---------- */
 button[kind="primary"], button[data-testid="stBaseButton-primary"] {
-    background: linear-gradient(90deg, var(--p1), var(--p2)); border: 0; color: #fff; border-radius: 12px; }
+    background: linear-gradient(90deg, var(--p1), var(--p2)); border: 0; color: #fff; border-radius: 12px; font-weight: 600; }
 button[kind="primary"]:hover, button[data-testid="stBaseButton-primary"]:hover { filter: brightness(1.08); }
 button[kind="secondary"], button[data-testid="stBaseButton-secondary"] { border-radius: 12px; }
-@media (max-width: 768px) { .main .block-container { padding-left: 1rem; padding-right: 1rem; } .hero-t { font-size: 1.3rem; } }
+@media (max-width: 768px) { .main .block-container { padding-left: 1rem; padding-right: 1rem; } .hero-t { font-size: 1.4rem; } }
 </style>
 """, unsafe_allow_html=True)
 
@@ -122,9 +148,9 @@ except Exception as e:
     st.stop()
 
 from auth import pantalla_login  # noqa: E402
-from repo import get_usuario, listar_asignaciones  # noqa: E402
-from ui import (PAG_ADMIN, PAG_ANUAL, PAG_BIBLIO, PAG_CALENDARIO, PAG_CURRICULO, PAG_PANEL,  # noqa: E402
-                PAG_TEMAS, mostrar_flash)
+from repo import get_usuario  # noqa: E402
+from ui import (PAG_ADMIN, PAG_ANUAL, PAG_BIBLIO, PAG_CALENDARIO, PAG_CURRICULO, PAG_CURSOS,  # noqa: E402
+                PAG_PANEL, PAG_TEMAS, mostrar_flash)
 import v_admin, v_anual, v_biblioteca, v_calendario, v_curriculo, v_panel, v_sesiones  # noqa: E402,E401
 
 if not st.session_state.get("logged_in"):
@@ -137,37 +163,34 @@ if not usuario or usuario["activo"] == 0:
         del st.session_state[k]
     st.rerun()
 es_admin = usuario["rol"] == "admin"
-asigs = listar_asignaciones(usuario["id"])
-ids = [a["id"] for a in asigs]
-if ids:
-    if st.session_state.get("area_id") not in ids:
-        st.session_state["area_id"] = ids[0]
-else:
-    st.session_state["area_id"] = None
 
-paginas = [PAG_PANEL, PAG_ANUAL, PAG_TEMAS, PAG_CALENDARIO, PAG_CURRICULO, PAG_BIBLIO] + ([PAG_ADMIN] if es_admin else [])
+paginas = [PAG_PANEL, PAG_CURSOS, PAG_ANUAL, PAG_TEMAS, PAG_CALENDARIO, PAG_CURRICULO, PAG_BIBLIO] + ([PAG_ADMIN] if es_admin else [])
 if st.session_state.get("nav") not in paginas:
     st.session_state["nav"] = PAG_PANEL
 
-# --- Barra lateral: marca, perfil, curso activo, menú y salir
+# --- Barra lateral: marca, perfil, menú y salir
 with st.sidebar:
     st.markdown("<div class='brand'>✏️ EduPerú IA</div>", unsafe_allow_html=True)
     creditos = "ilimitados" if es_admin else usuario["creditos"]
-    st.markdown(f"<div class='usercard'><b>👤 {usuario['nombre']}</b>{' · 🛡️ Admin' if es_admin else ''}<br>"
-                f"<span class='chip'>🎟️ Créditos: {creditos}</span></div>", unsafe_allow_html=True)
-    if not ids:
-        st.caption("📌 Aún no tienes cursos. Crea uno en Inicio.")
+    inicial = (usuario["nombre"] or "?").strip()[:1].upper()
+    st.markdown(f"<div class='usercard'><div class='avatar'>{inicial}</div><div><div class='nombre'>{html.escape(usuario['nombre'])}</div>"
+                f"<div class='rol'>{'Administrador' if es_admin else 'Docente'}</div>"
+                f"<span class='chip'>🎟️ {creditos} créditos</span></div></div>", unsafe_allow_html=True)
+    st.markdown("<div class='menu-t'>MENÚ</div>", unsafe_allow_html=True)
     pagina = st.radio("Menú", paginas, key="nav", label_visibility="collapsed")
+    st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
     st.divider()
     if st.button("🚪 Cerrar sesión", use_container_width=True):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.rerun()
-    st.caption("Alineado a CNEB y RM N.° 501-2025-MINEDU")
+    st.markdown("<div class='pie-lateral'>Alineado a CNEB y<br>RM N.° 501-2025-MINEDU</div>", unsafe_allow_html=True)
 
 mostrar_flash()
 if pagina == PAG_PANEL:
     v_panel.render()
+elif pagina == PAG_CURSOS:
+    v_panel.render_cursos()
 elif pagina == PAG_ANUAL:
     v_anual.render()
 elif pagina == PAG_TEMAS:
@@ -2577,6 +2600,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| from util import a_lista, a_texto, s
 #|
 #| PAG_PANEL = "🏠 Inicio"
+#| PAG_CURSOS = "📚 Mis cursos"
 #| PAG_ANUAL = "📅 Sílabo anual"
 #| PAG_TEMAS = "🎯 Temas y clases"
 #| PAG_CALENDARIO = "🗓️ Calendario"
@@ -2591,6 +2615,14 @@ elif pagina == PAG_ADMIN and es_admin:
 #| # ------------------------------------------------------------------
 #| # Navegación y mensajes
 #| # ------------------------------------------------------------------
+#| def caja(clave, borde=False):
+#|     """Contenedor con nombre propio (para darle estilo con CSS). Si tu Streamlit es antiguo, usa uno normal."""
+#|     try:
+#|         return st.container(border=borde, key=clave)
+#|     except TypeError:
+#|         return st.container(border=borde)
+#|
+#|
 #| def ir_a(pagina):
 #|     st.session_state["nav"] = pagina
 #|
@@ -3316,7 +3348,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                 st.rerun()
 #@@ END
 #@@ MODULE v_panel
-#| """Inicio: bienvenida, Mis cursos (crear arriba, eliminar de a uno o todos) y herramientas."""
+#| """Inicio (bienvenida y herramientas) y Mis cursos (crear, abrir y eliminar cursos)."""
 #| import html
 #|
 #| import streamlit as st
@@ -3324,19 +3356,22 @@ elif pagina == PAG_ADMIN and es_admin:
 #| from curriculo import GRADOS, NIVELES, REGIONES, areas_de, estado_area
 #| from repo import (borrar_asignacion, borrar_todas_asignaciones, crear_asignacion, get_usuario, listar_asignaciones,
 #|                   resumen_todas)
-#| from ui import PAG_ANUAL, PAG_BIBLIO, PAG_CALENDARIO, PAG_CURRICULO, PAG_TEMAS, abrir_siguiente, flash
+#| from ui import PAG_ANUAL, PAG_CURSOS, PAG_TEMAS, abrir_siguiente, caja, flash
 #|
 #| CLASE, UNIDAD = "📖 Una clase (un tema)", "📚 Toda la unidad"
+#| # (icono, título, descripción, pestaña de la clase o None, ámbito)
 #| HERRAMIENTAS = [
-#|     ("📅", "Sílabo anual", "Crea tu sílabo con los lineamientos del Estado", PAG_ANUAL, None),
-#|     ("📚", "Unidad de aprendizaje", "Diseña una unidad completa con su secuencia", PAG_TEMAS, UNIDAD),
-#|     ("📝", "Sesión de aprendizaje", "Elige un tema y crea su sesión", PAG_TEMAS, CLASE),
-#|     ("🏆", "Fichas y desafíos", "Desglosa un tema en fichas y retos para tus alumnos", PAG_TEMAS, CLASE),
-#|     ("📋", "Exámenes y rúbricas", "Por clase, por unidad o bimestral", PAG_TEMAS, UNIDAD),
-#|     ("🗓️", "Calendario", "Programa clases, exámenes y actividades", PAG_CALENDARIO, None),
-#|     ("📖", "Currículo oficial", "Consulta los lineamientos del MINEDU por curso", PAG_CURRICULO, None),
-#|     ("🗂️", "Mi biblioteca", "Todos tus documentos en un solo lugar", PAG_BIBLIO, None),
+#|     ("🎒", "Mis cursos", "Todos tus cursos en un solo lugar: crea, abre o elimina.", "CURSOS", None, None),
+#|     ("📚", "Unidad de aprendizaje", "Diseña una unidad completa con su secuencia.", PAG_TEMAS, UNIDAD, "📚 Unidad de aprendizaje"),
+#|     ("📝", "Sesión de aprendizaje", "Elige un tema y crea su sesión.", PAG_TEMAS, CLASE, "📖 Sesión de aprendizaje"),
+#|     ("🏆", "Fichas y desafíos", "Desglosa un tema en fichas de trabajo y retos.", PAG_TEMAS, CLASE, "📄 Ficha de trabajo"),
+#|     ("📊", "Rúbricas", "Evalúa con criterios claros y niveles de logro.", PAG_TEMAS, CLASE, "📊 Rúbrica"),
+#|     ("📋", "Exámenes", "Por clase, por unidad o bimestral.", PAG_TEMAS, CLASE, "📋 Examen"),
 #| ]
+#| ICONO_AREA = {"Matemática": "🔢", "Comunicación": "📖", "Ciencia y Tecnología": "🔬", "Personal Social": "🧑‍🤝‍🧑",
+#|               "Ciencias Sociales": "🌎", "Desarrollo Personal, Ciudadanía y Cívica": "🤝", "Arte y Cultura": "🎨",
+#|               "Educación Física": "⚽", "Inglés": "🔤", "Educación Religiosa": "🕊️", "Educación para el Trabajo": "🛠️",
+#|               "Psicomotricidad": "🤸"}
 #|
 #|
 #| # ---------------- callbacks (se ejecutan antes de redibujar: así pueden cambiar el curso activo) ----------------
@@ -3352,7 +3387,17 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                                    "nivel": ss["na_nivel"], "grado": ss["na_grado"], "area": ss["na_area"],
 #|                                    "seccion": (ss.get("na_seccion") or "").strip()})
 #|     ss["area_id"] = nuevo
-#|     flash(f"¡Listo! Creaste {ss['na_area']} · {ss['na_grado']}. Empieza por el sílabo anual.")
+#|     ss["crear_abierto"] = False
+#|     flash(f"¡Listo! Creaste {ss['na_area']} · {ss['na_grado']}. Ahora ábrelo y empieza por el sílabo anual.")
+#|
+#|
+#| def _ir_crear():
+#|     st.session_state["nav"] = PAG_CURSOS
+#|     st.session_state["crear_abierto"] = True
+#|
+#|
+#| def _alternar_crear():
+#|     st.session_state["crear_abierto"] = not st.session_state.get("crear_abierto", False)
 #|
 #|
 #| def _pedir_borrar(aid):
@@ -3386,51 +3431,71 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     flash("Se eliminaron todos tus cursos.")
 #|
 #|
-#| def _ir_herramienta(pagina, ambito):
-#|     st.session_state["nav"] = pagina
+#| def _ir_herramienta(pagina, ambito, seccion):
+#|     ss = st.session_state
+#|     if pagina == "CURSOS":
+#|         ss["nav"] = PAG_CURSOS
+#|         return
+#|     ss["nav"] = pagina
 #|     if ambito:
-#|         st.session_state["tc_ambito"] = ambito
+#|         ss["tc_ambito"] = ambito
+#|         ss["tc_sec_unidad" if ambito == UNIDAD else "tc_sec_clase"] = seccion
 #|
 #|
-#| # ---------------- pantalla ----------------
+#| # ---------------- INICIO ----------------
 #| def render():
 #|     uid = st.session_state.user_id
 #|     u = get_usuario(uid)
 #|     asigs = listar_asignaciones(uid)
 #|     nombre = html.escape(u["nombre"].split()[0])
 #|     creditos = "ilimitados" if u["rol"] == "admin" else u["creditos"]
-#|     st.markdown(f"""<div class="hero"><div class="hero-t">¡Hola, {nombre}! 👋</div>
-#| <div class="hero-s">Crea tu sílabo, tus clases, fichas, desafíos y exámenes en minutos, alineados al CNEB y a la RM N.° 501-2025-MINEDU.</div>
-#| <span class="chip">🎟️ Créditos: {creditos}</span></div>""", unsafe_allow_html=True)
 #|
-#|     # ---------- HERRAMIENTAS ----------
+#|     with caja("hero"):
+#|         st.markdown(f"<div class='hero-t'>¡Hola, {nombre}! 👋</div>"
+#|                     "<div class='hero-s'>Crea tu sílabo, tus clases, fichas, desafíos y exámenes en minutos, "
+#|                     "alineados al CNEB y a la RM N.° 501-2025-MINEDU.</div>"
+#|                     f"<span class='chip'>🎟️ Créditos: {creditos}</span>", unsafe_allow_html=True)
+#|         b1, b2, _ = st.columns([1.4, 1.4, 3])
+#|         b1.button("➕ Crear curso", key="hero_crear", on_click=_ir_crear, use_container_width=True)
+#|         b2.button("📚 Mis cursos", key="hero_cursos", on_click=lambda: st.session_state.update(nav=PAG_CURSOS),
+#|                   use_container_width=True)
+#|
+#|     st.markdown("<div style='height:.6rem'></div>", unsafe_allow_html=True)
+#|     if not asigs:
+#|         st.info("💡 **Empieza aquí:** pulsa **➕ Crear curso** (solo toma un minuto) y luego sigue con el sílabo anual.")
+#|     else:
+#|         activa = next((a for a in asigs if a["id"] == st.session_state.get("area_id")), asigs[0])
+#|         r = resumen_todas(uid).get(activa["id"], {})
+#|         with caja("continuar", borde=True):
+#|             c1, c2 = st.columns([4, 1.3])
+#|             c1.markdown(f"**▶ Sigue donde te quedaste:** {ICONO_AREA.get(activa['area'], '📘')} {activa['area']} · {activa['grado']} · "
+#|                         f"Sección {activa['seccion'] or '—'}")
+#|             c1.caption(f"Sílabo {'✅' if r.get('anual') else '⬜'}   ·   Unidades {r.get('unidad', 0)}   ·   "
+#|                        f"Clases {r.get('sesion', 0)}   ·   Documentos {sum(r.values()) if r else 0}")
+#|             c2.button("Continuar ▶", key="continuar_btn", on_click=abrir_siguiente, args=(activa["id"],),
+#|                       type="primary", use_container_width=True)
+#|
+#|     st.markdown("<div style='height:.4rem'></div>", unsafe_allow_html=True)
 #|     st.subheader("🛠️ ¿Qué quieres crear hoy?")
 #|     st.caption("Elige una herramienta. En la siguiente pantalla te preguntaré para qué curso.")
-#|     for fila in range(0, len(HERRAMIENTAS), 4):
-#|         cols = st.columns(4)
-#|         for col, (icono, titulo, desc, pagina, ambito) in zip(cols, HERRAMIENTAS[fila:fila + 4]):
+#|     for fila in range(0, len(HERRAMIENTAS), 3):
+#|         cols = st.columns(3, gap="medium")
+#|         for col, (icono, titulo, desc, pagina, ambito, seccion) in zip(cols, HERRAMIENTAS[fila:fila + 3]):
 #|             with col:
-#|                 with st.container(border=True):
+#|                 with caja(f"card_{titulo.replace(' ', '_')}", borde=True):
 #|                     st.markdown(f"<div class='tool-i'>{icono}</div><div class='tool-t'>{titulo}</div>"
 #|                                 f"<div class='tool-d'>{desc}</div>", unsafe_allow_html=True)
-#|                     st.button("Abrir", key=f"tool_{titulo}", on_click=_ir_herramienta, args=(pagina, ambito),
-#|                               use_container_width=True)
+#|                     st.button("Abrir", key=f"tool_{titulo}", on_click=_ir_herramienta, args=(pagina, ambito, seccion),
+#|                               use_container_width=True, type="primary" if pagina == "CURSOS" else "secondary")
+#|     st.caption("Los pasos también están en el menú de la izquierda: Sílabo anual, Calendario, Currículo oficial y Mi biblioteca.")
 #|
-#|     # ---------- MIS CURSOS ----------
-#|     st.divider()
-#|     h1, h2 = st.columns([6, 1])
-#|     h1.subheader("📚 Mis cursos")
-#|     if asigs:
-#|         h2.button("🗑️", key="del_todos_btn", on_click=_pedir_borrar_todos, help="Eliminar TODOS mis cursos")
-#|     if st.session_state.get("_del_todos"):
-#|         st.warning("⚠️ ¿Eliminar **todos** tus cursos y todos sus documentos? No se puede deshacer.")
-#|         y, n, _ = st.columns([2, 1, 3])
-#|         y.button("Sí, eliminar todos", key="del_todos_si", on_click=_borrar_todos_cb, args=(uid,), type="primary")
-#|         n.button("No", key="del_todos_no", on_click=_cancelar_borrar_todos)
 #|
-#|     with st.expander("➕ Crear curso", expanded=not asigs):
+#| # ---------------- MIS CURSOS ----------------
+#| def _formulario_crear(uid, u):
+#|     with caja("form_crear", borde=True):
+#|         st.markdown("#### ➕ Nuevo curso")
 #|         st.caption("Estos datos aparecerán en todos tus documentos (los puedes cambiar después).")
-#|         c1, c2 = st.columns(2)
+#|         c1, c2 = st.columns(2, gap="medium")
 #|         nivel = c1.selectbox("Nivel", NIVELES, index=1, key="na_nivel")
 #|         grado = c2.selectbox("Grado / edad", GRADOS[nivel], key="na_grado")
 #|         areas = areas_de(nivel)
@@ -3445,39 +3510,72 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         if area:
 #|             _, _, n_des = estado_area(nivel, area, grado)
 #|             if n_des == 0:
-#|                 st.caption("ℹ️ Para este grado aún no hay desempeños oficiales cargados. Después podrás traerlos del MINEDU con IA "
-#|                            "o subir tus propios lineamientos en el paso «Lineamientos» del sílabo.")
-#|         st.button("✅ Crear curso", type="primary", key="na_crear", on_click=_crear_curso_cb, args=(uid,))
+#|                 st.caption("ℹ️ Para este grado aún no hay desempeños oficiales cargados. Después podrás traerlos del MINEDU "
+#|                            "con IA o subir tus propios lineamientos en el paso «Lineamientos» del sílabo.")
+#|         b1, b2, _ = st.columns([1.3, 1, 3])
+#|         b1.button("✅ Crear curso", type="primary", key="na_crear", on_click=_crear_curso_cb, args=(uid,),
+#|                   use_container_width=True)
+#|         b2.button("Cancelar", key="na_cancelar", on_click=_alternar_crear, use_container_width=True)
 #|
+#|
+#| def render_cursos():
+#|     uid = st.session_state.user_id
+#|     u = get_usuario(uid)
+#|     asigs = listar_asignaciones(uid)
+#|     st.title("📚 Mis cursos")
+#|     st.caption("Aquí están todos tus cursos. Abre uno para seguir trabajando.")
+#|
+#|     b1, b2, b3 = st.columns([1.4, 3.6, 0.6])
+#|     abierto = st.session_state.get("crear_abierto", False) or not asigs
+#|     if not abierto:
+#|         b1.button("➕ Crear curso", key="cursos_crear", on_click=_alternar_crear, type="primary", use_container_width=True)
+#|     if asigs:
+#|         b3.button("🗑️", key="del_todos_btn", on_click=_pedir_borrar_todos, help="Eliminar TODOS mis cursos")
+#|     if st.session_state.get("_del_todos"):
+#|         st.warning("⚠️ ¿Eliminar **todos** tus cursos y todos sus documentos? No se puede deshacer.")
+#|         y, n, _ = st.columns([2, 1, 3])
+#|         y.button("Sí, eliminar todos", key="del_todos_si", on_click=_borrar_todos_cb, args=(uid,), type="primary")
+#|         n.button("No", key="del_todos_no", on_click=_cancelar_borrar_todos)
+#|     if abierto:
+#|         _formulario_crear(uid, u)
 #|     if not asigs:
-#|         st.info("💡 **Empieza aquí:** crea tu primer curso (solo toma un minuto) y luego sigue con el sílabo anual.")
+#|         st.info("💡 Aún no tienes cursos. Completa los datos de arriba y pulsa **Crear curso**.")
+#|         return
+#|
+#|     st.markdown("<div style='height:.5rem'></div>", unsafe_allow_html=True)
 #|     activa = st.session_state.get("area_id")
-#|     resumen = resumen_todas(uid) if asigs else {}
+#|     resumen = resumen_todas(uid)
 #|     for nivel in NIVELES:
 #|         grupo = [a for a in asigs if a["nivel"] == nivel]
 #|         if not grupo:
 #|             continue
-#|         st.markdown(f"##### {nivel}")
-#|         cols = st.columns(3)
-#|         for i, a in enumerate(grupo):
-#|             with cols[i % 3]:
-#|                 with st.container(border=True):
-#|                     t1, t2 = st.columns([5, 1])
-#|                     t1.markdown(f"**{a['area']}**" + ("  🟣" if a["id"] == activa else ""))
-#|                     t2.button("✕", key=f"x_{a['id']}", on_click=_pedir_borrar, args=(a["id"],), help="Eliminar este curso")
-#|                     st.caption(f"{a['grado']} · Sección {a['seccion'] or '—'} · {a['ciclo_escolar']}")
-#|                     if st.session_state.get(f"_del_{a['id']}"):
-#|                         st.warning(f"¿Eliminar «{a['area']}»? Se borran sus documentos.")
-#|                         y, n = st.columns(2)
-#|                         y.button("Sí", key=f"xy_{a['id']}", on_click=_borrar_curso_cb, args=(a["id"],), type="primary",
-#|                                  use_container_width=True)
-#|                         n.button("No", key=f"xn_{a['id']}", on_click=_cancelar_borrar, args=(a["id"],),
-#|                                  use_container_width=True)
-#|                     else:
-#|                         r = resumen.get(a["id"], {})
-#|                         st.caption(f"📅 {'✅' if r.get('anual') else '⬜'}  📚 {r.get('unidad', 0)}  📝 {r.get('sesion', 0)}")
-#|                         st.button("Abrir ▶", key=f"abrir_{a['id']}", on_click=abrir_siguiente, args=(a["id"],),
-#|                                   use_container_width=True, type="primary")
+#|         st.markdown(f"### {nivel}")
+#|         for fila in range(0, len(grupo), 3):
+#|             cols = st.columns(3, gap="medium")
+#|             for col, a in zip(cols, grupo[fila:fila + 3]):
+#|                 with col:
+#|                     with caja(f"curso_{a['id']}", borde=True):
+#|                         t1, t2 = st.columns([5, 1])
+#|                         t1.markdown(f"<div class='curso-t'>{ICONO_AREA.get(a['area'], '📘')} {html.escape(a['area'])}</div>",
+#|                                     unsafe_allow_html=True)
+#|                         t2.button("✕", key=f"x_{a['id']}", on_click=_pedir_borrar, args=(a["id"],), help="Eliminar este curso")
+#|                         st.markdown(f"<div class='curso-s'>{a['grado']} · Sección {html.escape(a['seccion'] or '—')} · "
+#|                                     f"{a['ciclo_escolar']}" + ("  ·  <b style='color:#7c3aed'>● activo</b>" if a["id"] == activa else "")
+#|                                     + "</div>", unsafe_allow_html=True)
+#|                         if st.session_state.get(f"_del_{a['id']}"):
+#|                             st.warning(f"¿Eliminar «{a['area']}»? Se borran sus documentos.")
+#|                             y, n = st.columns(2)
+#|                             y.button("Sí", key=f"xy_{a['id']}", on_click=_borrar_curso_cb, args=(a["id"],), type="primary",
+#|                                      use_container_width=True)
+#|                             n.button("No", key=f"xn_{a['id']}", on_click=_cancelar_borrar, args=(a["id"],),
+#|                                      use_container_width=True)
+#|                         else:
+#|                             r = resumen.get(a["id"], {})
+#|                             st.markdown(f"<div class='curso-p'>📅 Sílabo {'✅' if r.get('anual') else '⬜'} &nbsp;·&nbsp; "
+#|                                         f"📚 {r.get('unidad', 0)} unidades &nbsp;·&nbsp; 📝 {r.get('sesion', 0)} clases</div>",
+#|                                         unsafe_allow_html=True)
+#|                             st.button("Abrir ▶", key=f"abrir_{a['id']}", on_click=abrir_siguiente, args=(a["id"],),
+#|                                       use_container_width=True, type="primary")
 #@@ END
 #@@ MODULE v_anual
 #| """Sílabo anual: datos, lineamientos del Estado, caracterización, competencias, unidades y temas (clases)."""
