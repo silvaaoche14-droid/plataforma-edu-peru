@@ -130,6 +130,12 @@ div[data-testid="stForm"] { border: none; }
 .curso-s { color: var(--suave); font-size: .86rem; margin: .15rem 0 .5rem; }
 .curso-p { font-size: .85rem; color: #4b5563; margin: .2rem 0 .8rem; }
 
+/* ---------- botones de las tarjetas de curso (no se cortan ni se apilan en celular) ---------- */
+[class*="st-key-curso_"] { overflow: visible; min-width: 0; }
+[class*="st-key-curso_"] [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: .5rem; }
+[class*="st-key-curso_"] [data-testid="stColumn"] { min-width: 0 !important; }
+[class*="st-key-curso_"] button { padding-left: .5rem; padding-right: .5rem; white-space: nowrap; }
+
 /* ---------- botones ---------- */
 button[kind="primary"], button[data-testid="stBaseButton-primary"] {
     background: linear-gradient(90deg, var(--p1), var(--p2)); border: 0; color: #fff; border-radius: 12px; font-weight: 600; }
@@ -152,6 +158,11 @@ from repo import get_usuario  # noqa: E402
 from ui import (PAG_ADMIN, PAG_ANUAL, PAG_BIBLIO, PAG_CALENDARIO, PAG_CURRICULO, PAG_CURSOS,  # noqa: E402
                 PAG_PANEL, PAG_TEMAS, mostrar_flash)
 import v_admin, v_anual, v_biblioteca, v_calendario, v_curriculo, v_panel, v_sesiones  # noqa: E402,E401
+
+
+def _volver(destino):
+    st.session_state.update(nav=destino, _nav_prev=PAG_PANEL, _nav_actual=destino)
+
 
 if not st.session_state.get("logged_in"):
     pantalla_login()
@@ -187,6 +198,16 @@ with st.sidebar:
     st.markdown("<div class='pie-lateral'>Alineado a CNEB y<br>RM N.° 501-2025-MINEDU</div>", unsafe_allow_html=True)
 
 mostrar_flash()
+_ant = st.session_state.get("_nav_actual")
+if _ant != pagina:
+    if _ant:
+        st.session_state["_nav_prev"] = _ant
+    st.session_state["_nav_actual"] = pagina
+if pagina != PAG_PANEL:
+    _prev = st.session_state.get("_nav_prev")
+    if _prev not in paginas or _prev == pagina:
+        _prev = PAG_PANEL
+    st.button("← Volver", key="btn_volver", on_click=_volver, args=(_prev,))
 if pagina == PAG_PANEL:
     v_panel.render()
 elif pagina == PAG_CURSOS:
@@ -1730,69 +1751,234 @@ elif pagina == PAG_ADMIN and es_admin:
 #|     return bloques_examen(asig, pdata, d), False, f"examen_{base}.docx"
 #@@ END
 #@@ MODULE ia
-#| """Proveedores de IA (OpenRouter primero, Gemini de respaldo) y utilidades para pedir JSON."""
+#| """IA: OpenRouter primero y Gemini de respaldo, de forma automática.
+#| Las claves se leen primero del panel de Administración (base de datos) y, si no hay, de Secrets.
+#| Nunca se muestran ni se guardan en los registros."""
 #| import json
 #| import re
 #| import time
+#|
 #| import requests
 #| import streamlit as st
 #|
+#| TIMEOUT = (10, 90)  # (segundos para conectar, segundos para esperar la respuesta)
+#| ORDEN = ["openrouter", "gemini"]
+#| PROVEEDORES = {
+#|     "openrouter": {"nombre": "OpenRouter", "modelo": "openai/gpt-4o-mini"},
+#|     "gemini": {"nombre": "Gemini", "modelo": "gemini-3.8-flash"},
+#| }
 #|
+#|
+#| class ErrorIA(RuntimeError):
+#|     def __init__(self, status, detalle):
+#|         super().__init__(f"{status}: {detalle}" if status else str(detalle))
+#|         self.status = status
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # Claves y modelos (panel de Administración primero, Secrets después)
+#| # ------------------------------------------------------------------
+#| def _db(clave):
+#|     try:
+#|         from db import fetch
+#|         f = fetch("SELECT valor FROM config WHERE clave=%s", (clave,), one=True)
+#|         return (f["valor"] or "").strip() if f else ""
+#|     except Exception:
+#|         return ""
+#|
+#|
+#| def _secret(seccion, campo):
+#|     try:
+#|         return str(st.secrets[seccion].get(campo, "") or "").strip()
+#|     except Exception:
+#|         return ""
+#|
+#|
+#| def clave_de(prov):
+#|     return _db(f"ia_{prov}_key") or _secret(prov, "api_key")
+#|
+#|
+#| def origen_clave(prov):
+#|     if _db(f"ia_{prov}_key"):
+#|         return "panel"
+#|     return "secrets" if _secret(prov, "api_key") else ""
+#|
+#|
+#| def modelo_de(prov):
+#|     return _db(f"ia_{prov}_model") or _secret(prov, "model") or PROVEEDORES[prov]["modelo"]
+#|
+#|
+#| def _limpiar(texto):
+#|     """Quita cualquier clave del texto antes de mostrarlo o guardarlo."""
+#|     t = str(texto)
+#|     for p in PROVEEDORES:
+#|         k = clave_de(p)
+#|         if k and len(k) > 6:
+#|             t = t.replace(k, "***")
+#|     t = re.sub(r"(sk-[A-Za-z0-9_\-]{8,}|AIza[A-Za-z0-9_\-]{10,})", "***", t)
+#|     return t[:300]
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # Registro técnico seguro (tabla nueva ia_registro; no toca nada existente)
+#| # ------------------------------------------------------------------
+#| @st.cache_resource(show_spinner=False)
+#| def _tabla_registro():
+#|     from db import conexion
+#|     c = conexion()
+#|     try:
+#|         cur = c.cursor()
+#|         cur.execute("""CREATE TABLE IF NOT EXISTS ia_registro (
+#|             id INT AUTO_INCREMENT PRIMARY KEY,
+#|             creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+#|             proveedor VARCHAR(20),
+#|             modelo VARCHAR(120),
+#|             ok TINYINT(1),
+#|             ms INT,
+#|             motivo VARCHAR(120),
+#|             detalle VARCHAR(400)
+#|         )""")
+#|         c.commit()
+#|         cur.close()
+#|     finally:
+#|         c.close()
+#|     return True
+#|
+#|
+#| def _registrar(prov, ok, ms, motivo, detalle=""):
+#|     try:
+#|         _tabla_registro()
+#|         from db import execute
+#|         execute("INSERT INTO ia_registro (proveedor, modelo, ok, ms, motivo, detalle) VALUES (%s,%s,%s,%s,%s,%s)",
+#|                 (prov, modelo_de(prov)[:120], 1 if ok else 0, int(ms), motivo[:120], _limpiar(detalle)[:400]))
+#|     except Exception:
+#|         pass  # el registro nunca debe romper la generación
+#|
+#|
+#| def registros_recientes(n=20):
+#|     try:
+#|         _tabla_registro()
+#|         from db import fetch
+#|         return fetch("SELECT creado_en, proveedor, modelo, ok, ms, motivo, detalle FROM ia_registro "
+#|                      "ORDER BY id DESC LIMIT %s", (int(n),))
+#|     except Exception:
+#|         return []
+#|
+#|
+#| # ------------------------------------------------------------------
+#| # Llamadas a cada proveedor (una sola vez, sin reintentos)
+#| # ------------------------------------------------------------------
 #| def _post(url, **kw):
-#|     """POST con 3 intentos si el proveedor responde 429/503; el error incluye el mensaje real del proveedor."""
-#|     r = None
-#|     for intento in range(3):
-#|         r = requests.post(url, **kw)
-#|         if r.status_code in (429, 503) and intento < 2:
-#|             time.sleep(4 * (intento + 1))
-#|             continue
-#|         break
+#|     r = requests.post(url, timeout=TIMEOUT, **kw)
 #|     if r.status_code >= 400:
 #|         try:
-#|             detalle = r.json().get("error", {})
-#|             detalle = detalle.get("message", r.text) if isinstance(detalle, dict) else str(detalle)
+#|             det = r.json().get("error", {})
+#|             det = det.get("message", r.text) if isinstance(det, dict) else str(det)
 #|         except ValueError:
-#|             detalle = r.text
-#|         raise RuntimeError(f"{r.status_code}: {str(detalle)[:250]}")
+#|             det = r.text
+#|         raise ErrorIA(r.status_code, _limpiar(det))
 #|     return r
 #|
 #|
 #| def llamar_openrouter(prompt: str) -> str:
-#|     cfg = st.secrets["openrouter"]
+#|     k = clave_de("openrouter")
+#|     if not k:
+#|         raise ErrorIA(None, "sin clave")
 #|     r = _post("https://openrouter.ai/api/v1/chat/completions",
-#|               headers={"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json"},
-#|               json={"model": cfg.get("model", "openai/gpt-4o-mini"),
-#|                     "messages": [{"role": "user", "content": prompt}], "max_tokens": 6000},
-#|               timeout=120)
-#|     return r.json()["choices"][0]["message"]["content"]
+#|               headers={"Authorization": f"Bearer {k}", "Content-Type": "application/json", "X-Title": "EduPeru IA"},
+#|               json={"model": modelo_de("openrouter"), "messages": [{"role": "user", "content": prompt}],
+#|                     "max_tokens": 6000})
+#|     datos = r.json()
+#|     if isinstance(datos, dict) and datos.get("error"):
+#|         e = datos["error"]
+#|         raise ErrorIA(e.get("code") if isinstance(e, dict) else None,
+#|                       _limpiar(e.get("message") if isinstance(e, dict) else e))
+#|     try:
+#|         return datos["choices"][0]["message"]["content"] or ""
+#|     except (KeyError, IndexError, TypeError):
+#|         raise ErrorIA(None, "respuesta con formato inesperado")
 #|
 #|
 #| def llamar_gemini(prompt: str) -> str:
-#|     """Gemini por su API REST (no depende de ninguna librería). El modelo se puede cambiar en Secrets: [gemini] model."""
-#|     cfg = st.secrets["gemini"]
-#|     modelo = cfg.get("model", "gemini-3.8-flash")
-#|     r = _post(f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent",
-#|               params={"key": cfg["api_key"]},
-#|               json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 8000}},
-#|               timeout=120)
-#|     partes = r.json()["candidates"][0]["content"]["parts"]
+#|     k = clave_de("gemini")
+#|     if not k:
+#|         raise ErrorIA(None, "sin clave")
+#|     r = _post(f"https://generativelanguage.googleapis.com/v1beta/models/{modelo_de('gemini')}:generateContent",
+#|               headers={"x-goog-api-key": k, "Content-Type": "application/json"},  # la clave NO va en la URL
+#|               json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 8000}})
+#|     cand = r.json().get("candidates") or []
+#|     if not cand:
+#|         raise ErrorIA(None, "Gemini no devolvió texto (posible bloqueo de contenido)")
+#|     partes = (cand[0].get("content") or {}).get("parts") or []
 #|     return "".join(p.get("text", "") for p in partes)
 #|
 #|
+#| _LLAMAR = {"openrouter": llamar_openrouter, "gemini": llamar_gemini}
+#|
+#|
+#| def _motivo(e):
+#|     """Explicación corta y sin datos sensibles, en lenguaje claro."""
+#|     if isinstance(e, requests.exceptions.Timeout):
+#|         return "tardó demasiado en responder"
+#|     if isinstance(e, requests.exceptions.ConnectionError):
+#|         return "no hubo conexión con el servicio"
+#|     st_ = getattr(e, "status", None)
+#|     txt = str(e).lower()
+#|     if st_ in (401, 403) or ("api key" in txt and "valid" in txt):
+#|         return "clave rechazada (inválida, vencida o sin permiso)"
+#|     if st_ == 402:
+#|         return "sin saldo o créditos en la cuenta del proveedor"
+#|     if st_ == 404:
+#|         return "modelo no encontrado (revisa el nombre del modelo)"
+#|     if st_ == 429:
+#|         return "límite de uso alcanzado"
+#|     if isinstance(st_, int) and st_ >= 500:
+#|         return "el servicio tiene fallas temporales"
+#|     if "sin clave" in txt:
+#|         return "sin clave configurada"
+#|     return "respondió con un error"
+#|
+#|
 #| def generar_texto(prompt: str):
-#|     """Devuelve (texto, proveedor). Lanza RuntimeError si fallan todos los proveedores."""
-#|     errores = []
-#|     if "openrouter" in st.secrets:
+#|     """Devuelve (texto, proveedor). Siempre prueba OpenRouter primero; si falla, pasa a Gemini.
+#|     Si el primero respondió bien, NO se llama al segundo (no se duplica el contenido)."""
+#|     fallos = []
+#|     for prov in ORDEN:
+#|         nombre = PROVEEDORES[prov]["nombre"]
+#|         if not clave_de(prov):
+#|             fallos.append((nombre, "sin clave configurada"))
+#|             continue
+#|         t0 = time.time()
 #|         try:
-#|             return llamar_openrouter(prompt), "OpenRouter"
+#|             texto = _LLAMAR[prov](prompt)
+#|             if not (texto or "").strip():
+#|                 raise ErrorIA(None, "respuesta vacía")
 #|         except Exception as e:
-#|             errores.append(f"OpenRouter: {e}")
-#|     if "gemini" in st.secrets:
-#|         try:
-#|             return llamar_gemini(prompt), "Gemini"
-#|         except Exception as e:
-#|             errores.append(f"Gemini: {e}")
-#|     raise RuntimeError(" | ".join(errores) or "No hay proveedores de IA configurados en Secrets.")
+#|             motivo = _motivo(e)
+#|             _registrar(prov, False, (time.time() - t0) * 1000, motivo, str(e))
+#|             fallos.append((nombre, motivo))
+#|             continue
+#|         _registrar(prov, True, (time.time() - t0) * 1000, "ok")
+#|         return texto, nombre
+#|     detalle = "; ".join(f"{n}: {m}" for n, m in fallos)
+#|     raise RuntimeError(f"La IA no está disponible en este momento ({detalle}). No se descontaron créditos. "
+#|                        "Intenta de nuevo en unos minutos; si continúa, avisa al administrador.")
+#|
+#|
+#| def probar_proveedor(prov):
+#|     """Para el panel de Administración: (ok, mensaje, milisegundos). No usa el otro proveedor."""
+#|     if not clave_de(prov):
+#|         return False, "No hay clave configurada.", 0
+#|     t0 = time.time()
+#|     try:
+#|         res = _LLAMAR[prov]("Responde solo con la palabra: ok")
+#|         ms = (time.time() - t0) * 1000
+#|         _registrar(prov, True, ms, "prueba ok")
+#|         return True, f"Respondió: {res.strip()[:40]}", ms
+#|     except Exception as e:
+#|         ms = (time.time() - t0) * 1000
+#|         _registrar(prov, False, ms, _motivo(e), str(e))
+#|         return False, f"{_motivo(e)} · {_limpiar(e)}", ms
 #|
 #|
 #| def parse_json(texto: str):
@@ -1818,7 +2004,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #|
 #| def pedir_json(prompt: str):
-#|     """Devuelve (datos, proveedor). Reintenta una vez si la IA no devuelve JSON válido."""
+#|     """Devuelve (datos, proveedor). Reintenta una vez SOLO si la IA respondió pero no con JSON válido."""
 #|     texto, prov = generar_texto(prompt + SUFIJO_JSON)
 #|     datos = parse_json(texto)
 #|     if datos is None:
@@ -3555,10 +3741,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #|             for col, a in zip(cols, grupo[fila:fila + 3]):
 #|                 with col:
 #|                     with caja(f"curso_{a['id']}", borde=True):
-#|                         t1, t2 = st.columns([5, 1])
-#|                         t1.markdown(f"<div class='curso-t'>{ICONO_AREA.get(a['area'], '📘')} {html.escape(a['area'])}</div>",
+#|                         st.markdown(f"<div class='curso-t'>{ICONO_AREA.get(a['area'], '📘')} {html.escape(a['area'])}</div>",
 #|                                     unsafe_allow_html=True)
-#|                         t2.button("✕", key=f"x_{a['id']}", on_click=_pedir_borrar, args=(a["id"],), help="Eliminar este curso")
 #|                         st.markdown(f"<div class='curso-s'>{a['grado']} · Sección {html.escape(a['seccion'] or '—')} · "
 #|                                     f"{a['ciclo_escolar']}" + ("  ·  <b style='color:#7c3aed'>● activo</b>" if a["id"] == activa else "")
 #|                                     + "</div>", unsafe_allow_html=True)
@@ -3574,8 +3758,11 @@ elif pagina == PAG_ADMIN and es_admin:
 #|                             st.markdown(f"<div class='curso-p'>📅 Sílabo {'✅' if r.get('anual') else '⬜'} &nbsp;·&nbsp; "
 #|                                         f"📚 {r.get('unidad', 0)} unidades &nbsp;·&nbsp; 📝 {r.get('sesion', 0)} clases</div>",
 #|                                         unsafe_allow_html=True)
-#|                             st.button("Abrir ▶", key=f"abrir_{a['id']}", on_click=abrir_siguiente, args=(a["id"],),
+#|                             b1, b2 = st.columns([4, 1.3])
+#|                             b1.button("Abrir ▶", key=f"abrir_{a['id']}", on_click=abrir_siguiente, args=(a["id"],),
 #|                                       use_container_width=True, type="primary")
+#|                             b2.button("🗑️", key=f"x_{a['id']}", on_click=_pedir_borrar, args=(a["id"],),
+#|                                       help="Eliminar este curso", use_container_width=True)
 #@@ END
 #@@ MODULE v_anual
 #| """Sílabo anual: datos, lineamientos del Estado, caracterización, competencias, unidades y temas (clases)."""
@@ -4885,9 +5072,10 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #| import v_programas
 #| from db import medir_latencia
-#| from ia import llamar_gemini, llamar_openrouter
+#| from ia import (PROVEEDORES, clave_de, llamar_gemini, llamar_openrouter, modelo_de, origen_clave,
+#|                 probar_proveedor, registros_recientes)
 #| from programas import PORTALES
-#| from ui import descargar
+#| from ui import descargar, flash
 #|
 #| ROLES = ["docente", "director", "admin"]
 #| TIPOS_NORMA = ["curricular", "pedagógico/normativo", "administrativo"]
@@ -4896,7 +5084,7 @@ elif pagina == PAG_ADMIN and es_admin:
 #| def render(admin_id):
 #|     st.title("⚙️ Administración")
 #|     t = st.tabs(["📊 Resumen", "👥 Usuarios", "🏫 Colegios", "🎓 Currículo", "📜 Normativa MINEDU", "🎟️ Costos",
-#|                  "🩺 Diagnóstico"])
+#|                  "🩺 Diagnóstico", "🤖 IA"])
 #|     with t[0]:
 #|         panel_resumen()
 #|     with t[1]:
@@ -4911,6 +5099,8 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         panel_costos()
 #|     with t[6]:
 #|         panel_diagnostico()
+#|     with t[7]:
+#|         panel_ia()
 #|
 #|
 #| # ------------------------------------------------------------------
@@ -5240,6 +5430,62 @@ elif pagina == PAG_ADMIN and es_admin:
 #|
 #|
 #| # ------------------------------------------------------------------
+#| # IA: claves y modelos (se aplican al instante, sin reiniciar)
+#| # ------------------------------------------------------------------
+#| def _guardar_ia(prov):
+#|     ss = st.session_state
+#|     nueva = (ss.get(f"ia_k_{prov}") or "").strip()
+#|     modelo = (ss.get(f"ia_m_{prov}") or "").strip()
+#|     if nueva and (" " in nueva or len(nueva) > 250):
+#|         flash("Esa clave no parece válida (tiene espacios o es demasiado larga). No se guardó nada.", "error")
+#|         return
+#|     if nueva:
+#|         config_set(f"ia_{prov}_key", nueva)
+#|     config_set(f"ia_{prov}_model", modelo)
+#|     ss[f"ia_k_{prov}"] = ""  # se borra el campo para que la clave no quede en pantalla
+#|     flash(f"{PROVEEDORES[prov]['nombre']}: guardado ✅ Ya lo usa todo el sistema. Pulsa «Probar» para comprobarlo.")
+#|
+#|
+#| def _quitar_ia(prov):
+#|     config_set(f"ia_{prov}_key", "")
+#|     flash(f"Se quitó la clave del panel para {PROVEEDORES[prov]['nombre']}. "
+#|           "Si hay una en Secrets, se usará esa.", "info")
+#|
+#|
+#| def panel_ia():
+#|     st.subheader("Proveedores de IA")
+#|     st.caption("Orden automático: **OpenRouter** primero; si falla, **Gemini**. Las claves que guardes aquí tienen "
+#|                "prioridad sobre las de Secrets. Nunca se muestran completas.")
+#|     for prov, etiqueta in (("openrouter", "OpenRouter · principal"), ("gemini", "Gemini · respaldo")):
+#|         with st.container(border=True):
+#|             st.markdown(f"**{etiqueta}**")
+#|             k, origen = clave_de(prov), origen_clave(prov)
+#|             if not k:
+#|                 st.error("Sin clave configurada.")
+#|             else:
+#|                 donde = "panel de Administración" if origen == "panel" else "Secrets de Streamlit"
+#|                 st.success(f"Clave configurada (termina en …{k[-4:]}) · origen: {donde}")
+#|             st.text_input("Pegar una clave nueva (déjalo vacío para no cambiarla)", type="password", key=f"ia_k_{prov}")
+#|             st.text_input("Modelo", value=modelo_de(prov), key=f"ia_m_{prov}",
+#|                           help="Ejemplos: openai/gpt-4o-mini en OpenRouter. En Gemini usa el nombre exacto que vea tu cuenta.")
+#|             c1, c2, c3 = st.columns(3)
+#|             c1.button("💾 Guardar", key=f"ia_g_{prov}", type="primary", on_click=_guardar_ia, args=(prov,),
+#|                       use_container_width=True)
+#|             if c2.button("🧪 Probar", key=f"ia_t_{prov}", use_container_width=True):
+#|                 with st.spinner("Probando..."):
+#|                     ok, msg, ms = probar_proveedor(prov)
+#|                 (st.success if ok else st.error)(f"{'✅' if ok else '❌'} {msg} ({ms:.0f} ms)")
+#|             c3.button("🗑️ Quitar del panel", key=f"ia_q_{prov}", on_click=_quitar_ia, args=(prov,),
+#|                       use_container_width=True, disabled=origen != "panel")
+#|     st.markdown("#### Últimos intentos (sin claves)")
+#|     reg = registros_recientes(20)
+#|     if reg:
+#|         st.dataframe(pd.DataFrame(reg), hide_index=True)
+#|     else:
+#|         st.caption("Todavía no hay registros.")
+#|
+#|
+#| # ------------------------------------------------------------------
 #| # NORMATIVA
 #| # ------------------------------------------------------------------
 #| def panel_normativa(admin_id):
@@ -5351,17 +5597,20 @@ elif pagina == PAG_ADMIN and es_admin:
 #|         return ("✅", "Todas las tablas existen.") if not faltan else ("❌", "Faltan tablas: " + ", ".join(sorted(faltan)))
 #|
 #|     def _secrets():
-#|         faltan = [x for x in ("mysql", "admin", "openrouter", "gemini") if x not in st.secrets]
-#|         return ("✅", "Secrets completos.") if not faltan else ("⚠️", "Faltan secciones en Secrets: " + ", ".join(faltan))
+#|         faltan = [PROVEEDORES[p]["nombre"] for p in ("openrouter", "gemini") if not clave_de(p)]
+#|         for x in ("mysql", "admin"):
+#|             if x not in st.secrets:
+#|                 faltan.append(f"Secrets [{x}]")
+#|         return ("✅", "Claves y Secrets completos.") if not faltan else ("⚠️", "Falta configurar: " + ", ".join(faltan))
 #|
 #|     def _or():
-#|         if "openrouter" not in st.secrets:
-#|             return "⚠️", "No hay [openrouter] en Secrets."
+#|         if not clave_de("openrouter"):
+#|             return "⚠️", "No hay clave de OpenRouter (panel IA o Secrets)."
 #|         return "✅", "Respondió: " + llamar_openrouter("Responde solo con la palabra: ok")[:40]
 #|
 #|     def _gem():
-#|         if "gemini" not in st.secrets:
-#|             return "⚠️", "No hay [gemini] en Secrets."
+#|         if not clave_de("gemini"):
+#|             return "⚠️", "No hay clave de Gemini (panel IA o Secrets)."
 #|         return "✅", "Respondió: " + llamar_gemini("Responde solo con la palabra: ok")[:40]
 #|
 #|     def _minedu():
