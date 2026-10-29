@@ -186,6 +186,20 @@ div[data-testid="stAlert"] p { font-size:.93rem; line-height:1.5; }
 [class*="st-key-curso_"] [data-testid="stColumn"] { min-width:0 !important; }
 [class*="st-key-curso_"] button { padding-left:.5rem; padding-right:.5rem; white-space:nowrap; }
 
+
+/* ================= PASOS (guía para el docente) ================= */
+.steps { display:flex; gap:.6rem; margin:.4rem 0 1.1rem; flex-wrap:wrap; }
+.step { display:flex; align-items:center; gap:.55rem; background:var(--surface); border:1px solid var(--border);
+  border-radius:999px; padding:.4rem .95rem .4rem .45rem; font-size:.86rem; font-weight:600; color:var(--muted); }
+.step-n { width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+  background:#F3F4F6; color:var(--muted); font-size:.8rem; font-weight:800; }
+.step.on { color:var(--brand-1); border-color:#C7D2FE; background:var(--brand-soft); }
+.step.on .step-n { background:var(--grad); color:#fff; }
+.step.done { color:var(--ok-fg); border-color:#A7F3D0; background:var(--ok-bg); }
+.step.done .step-n { background:#10B981; color:#fff; }
+.opc { font-size:.78rem; font-weight:500; color:var(--muted); }
+h5 { margin-top:.4rem; }
+
 /* ================= RESPONSIVE ================= */
 @media (max-width:768px) {
   .main .block-container { padding-left:1rem; padding-right:1rem; }

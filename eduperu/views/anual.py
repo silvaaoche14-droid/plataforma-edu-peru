@@ -93,26 +93,25 @@ def _paso_lineamientos(asig, ver_key):
     aid, uid = asig["id"], st.session_state.user_id
     propio = asig.get("lineamientos_fuente") or ""
     n_comp, n_ver, n_des = estado_area(asig["nivel"], asig["area"], asig["grado"], aid)
-    st.markdown("**¿Con qué lineamientos armamos tu sílabo?**  Siempre son textos del Estado, nunca inventados por la IA.")
+    st.caption("Son los textos oficiales del Estado; la IA no los inventa.")
     if propio:
-        st.success(f"📌 Estás usando lineamientos propios de este curso: {propio}")
-        if st.button("↩️ Volver a usar el currículo oficial del sistema", key=f"lin_oficial_{aid}"):
+        st.success(f"📌 Usas lineamientos propios: {propio}")
+        if st.button("↩️ Volver a los del sistema", key=f"lin_oficial_{aid}"):
             usar_oficial(asig)
-            flash("Ahora el curso usa el currículo oficial del sistema.")
+            flash("Listo: el curso usa los lineamientos del sistema.")
             st.rerun()
     elif n_ver == n_comp and n_des == n_comp:
-        st.success(f"✅ El currículo oficial de {asig['area']} · {asig['grado']} está verificado y listo.")
+        st.success("✅ Todo listo: no necesitas hacer nada aquí.")
     else:
-        st.warning(f"⚠️ El currículo oficial de este curso aún no está completo ({n_des} de {n_comp} competencias con "
-                   "desempeños). Puedes traerlo del MINEDU con IA o subir tus propios lineamientos.")
+        st.warning(f"⚠️ Faltan desempeños en este curso ({n_des} de {n_comp} competencias). "
+                   "Elige abajo cómo completarlos.")
 
-    opcion = st.radio("Origen de los lineamientos", ["📘 Currículo oficial del sistema", "🔎 Consultar el MINEDU con IA",
-                                                      "📤 Subir mis lineamientos (PDF o Word)"],
-                      key=f"lin_op_{aid}", horizontal=True, label_visibility="collapsed")
+    opcion = st.radio("¿Cómo los obtenemos?", ["📘 Usar los del sistema", "🔎 Buscar en el MINEDU",
+                                               "📤 Subir mi archivo"],
+                      key=f"lin_op2_{aid}", horizontal=True)
     if opcion.startswith("🔎"):
-        st.caption("El sistema revisa los PDF oficiales del MINEDU en gob.pe, busca los desempeños de este curso y los "
-                   "comprueba palabra por palabra contra el documento. Puede tardar unos minutos la primera vez.")
-        if confirmar("lineamientos", "Traer lineamientos del MINEDU", f"lin_traer_{aid}"):
+        st.caption("Busca en los PDF oficiales del MINEDU y verifica cada texto. Puede tardar unos minutos la primera vez.")
+        if confirmar("lineamientos", "Buscar en el MINEDU", f"lin_traer_{aid}"):
             barra = st.progress(0.0)
             try:
                 res = traer_oficial(asig, lambda f, t: barra.progress(min(f, 1.0), text=t))
@@ -123,10 +122,9 @@ def _paso_lineamientos(asig, ver_key):
             except Exception as e:
                 st.error(f"No se pudo: {e}")
     elif opcion.startswith("📤"):
-        st.caption("Sube el documento con tus lineamientos (por ejemplo, el Programa Curricular de tu nivel). "
-                   "Solo se usarán los desempeños que aparezcan en tu archivo.")
+        st.caption("Sube tu PDF o Word (por ejemplo, el Programa Curricular de tu nivel).")
         archivo = st.file_uploader("Archivo PDF o Word", type=["pdf", "docx", "txt"], key=f"lin_up_{aid}")
-        if archivo is not None and confirmar("lineamientos", "Leer mis lineamientos", f"lin_leer_{aid}"):
+        if archivo is not None and confirmar("lineamientos", "Leer mi archivo", f"lin_leer_{aid}"):
             barra = st.progress(0.0)
             try:
                 res = desde_archivo(asig, archivo.name, archivo.getvalue(), lambda f, t: barra.progress(min(f, 1.0), text=t))
@@ -138,17 +136,26 @@ def _paso_lineamientos(asig, ver_key):
                 st.error(f"No se pudo leer: {e}")
 
 
+def _pasos(hay_doc):
+    """Barra de 3 pasos para orientar al docente."""
+    pasos = [("1", "Tu curso", "done"), ("2", "Genera tu sílabo", "done" if hay_doc else "on"),
+             ("3", "Revisa y descarga", "on" if hay_doc else "")]
+    st.markdown("<div class='steps'>" + "".join(
+        f"<div class='step {c}'><span class='step-n'>{'✓' if c == 'done' else n}</span><span class='step-t'>{tt}</span></div>"
+        for n, tt, c in pasos) + "</div>", unsafe_allow_html=True)
+
+
 def render():
     asig = exigir_area()
     uid, aid = st.session_state.user_id, asig["id"]
     st.title("📅 Sílabo anual")
-    st.caption(f"{asig['area']} · {asig['grado']} · Sección {asig['seccion'] or '—'}  |  Alineado a CNEB y RM N.° 501-2025-MINEDU")
-    st.info("💡 Sigue los pasos de arriba hacia abajo. Lo que escribe la IA siempre lo puedes editar antes de guardar.")
+    st.caption(f"{asig['area']} · {asig['grado']} · Sección {asig['seccion'] or '—'}")
 
     ver_key = f"ver_anual_{aid}"
     ver = st.session_state.get(ver_key, 0)
     doc = get_doc(aid, "anual")
     data = contenido(doc) if doc else {}
+    _pasos(bool(doc))
     if doc:
         from eduperu.services.exportar import bloques_de
         from eduperu.services.render import a_docx
@@ -156,9 +163,10 @@ def render():
         descargar("⬇️ Descargar mi sílabo en Word", a_docx(bl, doc.get("color"), doc.get("normativa_usada"), hor), archivo,
                   MIME_DOCX, f"dl_top_anual_{aid}", type="primary")
 
-    # ① DATOS
-    st.subheader("① Datos informativos")
-    with st.expander("Ver y editar mis datos", expanded=not asig["director"]):
+    st.markdown("##### Prepara tu curso <span class='opc'>(revisa solo lo que necesites)</span>", unsafe_allow_html=True)
+
+    # DATOS
+    with st.expander("👤 Mis datos: colegio, director, sección", expanded=not asig["director"]):
         c1, c2 = st.columns(2)
         inst = c1.text_input("Institución educativa", value=asig["institucion"] or "", key=f"d_inst_{aid}")
         director = c2.text_input("Director(a)", value=asig["director"] or "", key=f"d_dir_{aid}")
@@ -172,61 +180,67 @@ def render():
             flash("Datos guardados ✅")
             st.rerun()
 
-    # ② LINEAMIENTOS
-    st.subheader("② Lineamientos del Estado")
-    _paso_lineamientos(asig, ver_key)
+    # LINEAMIENTOS
+    n_comp, n_ver, n_des = estado_area(asig["nivel"], asig["area"], asig["grado"], aid)
+    lin_listo = bool(asig.get("lineamientos_fuente")) or (n_ver == n_comp and n_des == n_comp)
+    with st.expander("📘 Competencias y desempeños del MINEDU  " + ("✅ Listo" if lin_listo else "⚠️ Revisar"),
+                     expanded=not lin_listo):
+        _paso_lineamientos(asig, ver_key)
 
-    # ③ CARACTERIZACIÓN
-    st.subheader("③ Caracterización de tus estudiantes")
-    st.caption("Describe brevemente cómo son tus estudiantes. Si no sabes qué escribir, pide un boceto a la IA.")
-    notas = st.text_input("Cuéntame algo de tus estudiantes (opcional)", key=f"car_notas_{aid}",
-                          placeholder="Ej.: zona rural, les gusta el fútbol, varios trabajan con sus padres")
-    if confirmar("caracterizacion", "✨ Escribir boceto con IA", f"car_{aid}"):
-        try:
-            with st.spinner("Escribiendo el boceto..."):
-                texto = _generar_caracterizacion(asig, notas)
-            actualizar_asignacion(aid, caracterizacion=texto)
-            cobrar(uid, "caracterizacion")
-            siguiente_version(ver_key)
-            flash("Boceto listo. Léelo y ajústalo a tu realidad.")
+    # CARACTERIZACIÓN
+    with st.expander("🧑‍🎓 Mis estudiantes  " + ("✅" if asig.get("caracterizacion") else "(opcional, ayuda a la IA)")):
+        st.caption("Cuéntanos cómo son tus estudiantes para que la IA adapte el sílabo. Si no sabes qué escribir, pide un boceto.")
+        notas = st.text_input("Una idea breve (opcional)", key=f"car_notas_{aid}",
+                              placeholder="Ej.: zona rural, les gusta el fútbol, varios trabajan con sus padres")
+        if confirmar("caracterizacion", "✨ Escribir boceto con IA", f"car_{aid}"):
+            try:
+                with st.spinner("Escribiendo el boceto..."):
+                    texto = _generar_caracterizacion(asig, notas)
+                actualizar_asignacion(aid, caracterizacion=texto)
+                cobrar(uid, "caracterizacion")
+                siguiente_version(ver_key)
+                flash("Boceto listo. Léelo y ajústalo a tu realidad.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo generar: {e}")
+        car = campo_texto("Descripción de mis estudiantes", f"car_{aid}_{ver}", asig.get("caracterizacion") or "", 150)
+        if st.button("💾 Guardar", key=f"car_save_{aid}"):
+            actualizar_asignacion(aid, caracterizacion=car)
+            flash("Guardado ✅")
             st.rerun()
-        except Exception as e:
-            st.error(f"No se pudo generar: {e}")
-    car = campo_texto("Caracterización del estudiante", f"car_{aid}_{ver}", asig.get("caracterizacion") or "", 150)
-    if st.button("💾 Guardar caracterización", key=f"car_save_{aid}"):
-        actualizar_asignacion(aid, caracterizacion=car)
-        flash("Caracterización guardada ✅")
-        st.rerun()
 
-    # ④ COMPETENCIAS
-    st.subheader("④ Competencias que trabajarás este año")
+    # COMPETENCIAS
     comps = competencias_de(asig["nivel"], asig["area"])
     if not comps:
         st.error("Este curso todavía no tiene competencias cargadas. Pide al administrador que las agregue en "
                  "Administración → Currículo.")
         st.stop()
     nombres = [c["nombre"] for c in comps]
-    sel = campo_multi("Competencias del año", f"comp_{aid}_{ver}", nombres, data.get("competencias_area") or nombres)
+    with st.expander("🎯 Competencias que trabajarás este año"):
+        st.caption("Ya vienen todas marcadas. Quita las que no vayas a trabajar.")
+        sel = campo_multi("Competencias del año", f"comp_{aid}_{ver}", nombres, data.get("competencias_area") or nombres)
+        if sel:
+            comps_ver = [c for c in comps if c["nombre"] in sel]
+            for c in comps_ver:
+                st.markdown(f"**{c['nombre']}**" + ("" if c["verificado"] else "  ⚠️ _pendiente de verificación_"))
+                st.caption(" · ".join(c["capacidades"]))
     if not sel:
-        st.warning("Elige al menos una competencia.")
+        st.warning("Elige al menos una competencia (en «🎯 Competencias que trabajarás este año»).")
         st.stop()
     comps_sel = [c for c in comps if c["nombre"] in sel]
-    with st.expander("Ver capacidades de cada competencia"):
-        for c in comps_sel:
-            st.markdown(f"**{c['nombre']}**" + ("" if c["verificado"] else "  ⚠️ _pendiente de verificación_"))
-            st.markdown("\n".join(f"- {x}" for x in c["capacidades"]))
 
-    # ⑤ UNIDADES Y TEMAS
-    st.subheader("⑤ Unidades, situaciones significativas y temas")
+    # UNIDADES Y TEMAS
+    st.markdown("---")
+    st.subheader("🚀 Tu sílabo" if unidades_hay(data) else "🚀 Genera tu sílabo")
     unidades = data.get("unidades") or []
     n = len(unidades)
     spw = 3
     if not unidades:
+        st.caption("La IA propone las unidades del año, con su situación significativa y los temas de cada clase. "
+                   "Después puedes editar todo.")
         c1, c2 = st.columns(2)
         n = int(c1.number_input("¿Cuántas unidades tendrá el año?", 1, 12, 6, key=f"nuni_{aid}"))
         spw = int(c2.number_input("Clases por semana", 1, 8, 3, key=f"spw_anual_{aid}"))
-    st.caption("La IA propone, con los lineamientos de arriba, una situación significativa por unidad y los temas "
-               "(clases) de cada una.")
     if confirmar("anual", "✨ Generar sílabo con IA" if not unidades else "🔄 Volver a generar (reemplaza lo actual)",
                  f"anual_{aid}", asig=asig):
         try:
@@ -243,21 +257,25 @@ def render():
             st.error(f"No se pudo generar: {e}")
 
     if unidades:
+        st.caption("Abre cada unidad para revisarla. Lo principal está en la primera pestaña; lo demás, en «Más detalles».")
         for u in unidades:
             i = u["numero"]
             base = f"an_{aid}_{ver}_{i}"
-            with st.expander(f"Unidad {i}: {u['titulo']}  ·  {len(u.get('temas') or [])} temas", expanded=(i == 1)):
-                campo_linea("Título de la unidad", f"{base}_t", u["titulo"])
-                campo_texto("Problema identificado", f"{base}_p", u["problema"], 80)
-                campo_texto("Situación significativa", f"{base}_s", u["situacion"], 160)
-                campo_linea("Valores observables", f"{base}_v", u["valores"])
-                cs = campo_multi("Competencias de esta unidad", f"{base}_c", sel, u["competencias"])
-                caps_op = [cap for c in comps if c["nombre"] in cs for cap in c["capacidades"]]
-                campo_multi("Capacidades a trabajar", f"{base}_k", caps_op, u["capacidades"])
-                campo_num("Semanas", f"{base}_w", 1, 12, u.get("semanas") or 4)
-                campo_texto("Temas / clases de la unidad (uno por línea)", f"{base}_tm",
-                            "\n".join(t["titulo"] for t in u.get("temas") or []), 180,
-                            "Estos temas son los que luego eliges en «Temas y clases» para crear sesiones, fichas y desafíos.")
+            with st.expander(f"📚 Unidad {i}: {u['titulo']}  ·  {len(u.get('temas') or [])} clases", expanded=(i == 1)):
+                tab_a, tab_b = st.tabs(["✍️ Lo principal", "⚙️ Más detalles"])
+                with tab_a:
+                    campo_linea("Título de la unidad", f"{base}_t", u["titulo"])
+                    campo_texto("Situación significativa", f"{base}_s", u["situacion"], 160)
+                    campo_texto("Clases de la unidad (una por línea)", f"{base}_tm",
+                                "\n".join(t["titulo"] for t in u.get("temas") or []), 180,
+                                "Estas clases son las que luego eliges en «Temas y clases» para crear sesiones, fichas y desafíos.")
+                with tab_b:
+                    campo_texto("Problema identificado", f"{base}_p", u["problema"], 80)
+                    campo_linea("Valores observables", f"{base}_v", u["valores"])
+                    cs = campo_multi("Competencias de esta unidad", f"{base}_c", sel, u["competencias"])
+                    caps_op = [cap for c in comps if c["nombre"] in cs for cap in c["capacidades"]]
+                    campo_multi("Capacidades a trabajar", f"{base}_k", caps_op, u["capacidades"])
+                    campo_num("Semanas", f"{base}_w", 1, 12, u.get("semanas") or 4)
 
         def recoger():
             res = []
@@ -297,8 +315,12 @@ def render():
             siguiente_version(ver_key)
             st.rerun()
 
-    # ⑥ DOCUMENTO
+    # DOCUMENTO
     if doc:
-        st.subheader("⑥ Tu documento")
-        vista_previa_y_descarga(doc["id"], f"anual_{aid}")
-        st.button("Siguiente: elegir un tema y crear sus materiales →", on_click=ir_a, args=(PAG_TEMAS,), type="primary")
+        st.subheader("📄 Vista previa de tu sílabo")
+        vista_previa_y_descarga(doc["id"], f"anual_{aid}", abierta=False)
+        st.button("Siguiente: elegir una clase y crear sus materiales →", on_click=ir_a, args=(PAG_TEMAS,), type="primary")
+
+
+def unidades_hay(data):
+    return bool(data.get("unidades"))

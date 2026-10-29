@@ -79,8 +79,7 @@ def render():
     asig = exigir_area()
     uid, aid = st.session_state.user_id, asig["id"]
     st.title("🎯 Temas y clases")
-    st.info("💡 Elige un tema de tu sílabo (una clase) o una unidad completa y crea con IA sus sesiones, fichas, "
-            "desafíos, rúbricas y exámenes.")
+    st.caption("Elige una clase de tu sílabo (o la unidad completa) y crea sus sesiones, fichas, desafíos, rúbricas y exámenes.")
     anual = get_doc(aid, "anual")
     if not anual:
         exigir_cadena("Primero crea tu sílabo anual: de ahí salen las unidades y los temas.", PAG_ANUAL,
@@ -144,7 +143,7 @@ def render():
 def _masivo(asig, udoc, udata, sesiones):
     uid = st.session_state.user_id
     faltan = [x for x in sesiones if not contenido(x).get("inicio")]
-    with st.expander(f"⚡ Generar todas las sesiones de la unidad ({len(faltan)} pendientes)"):
+    with st.expander(f"⚡ Generar todas las sesiones de la unidad de una vez ({len(faltan)} pendientes)"):
         if not faltan:
             st.success("Todas las sesiones de esta unidad ya tienen contenido.")
             return

@@ -184,15 +184,17 @@ def _unidad(asig, anual, ua):
     ver = st.session_state.get(ver_key, 0)
 
     st.subheader(f"Unidad {n}: {ua['titulo']}")
-    st.markdown(f"**Situación significativa:** {ua['situacion'] or '_(vacía: complétala en la planificación anual)_'}")
+    st.markdown(f"**Situación significativa:** {ua['situacion'] or '_(vacía: complétala en el sílabo anual)_'}")
     st.caption("Competencias: " + ", ".join(ua["competencias"]))
+    if not doc:
+        st.caption("Pulsa el botón morado y la IA armará la unidad con su secuencia de clases. Después podrás editarla.")
 
     # --- Generar / importar
     with st.container(border=True):
         c1, c2 = st.columns(2)
-        semanas = c1.number_input("Semanas de la unidad", 1, 12, entero(d.get("semanas") or ua.get("semanas"), 4, 1, 12),
+        semanas = c1.number_input("¿Cuántas semanas dura?", 1, 12, entero(d.get("semanas") or ua.get("semanas"), 4, 1, 12),
                                   key=f"sem_{aid}_{n}_{ver}")
-        spw = c2.number_input("Sesiones por semana", 1, 8, entero(d.get("sesiones_por_semana"), 3, 1, 8),
+        spw = c2.number_input("Clases por semana", 1, 8, entero(d.get("sesiones_por_semana"), 3, 1, 8),
                               key=f"spw_{aid}_{n}_{ver}")
         etiqueta = "✨ Generar unidad con IA" if not doc else "🔄 Volver a generar (reemplaza lo actual)"
         if confirmar("unidad", etiqueta, f"unidad_{aid}_{n}", asig=asig):
@@ -208,7 +210,7 @@ def _unidad(asig, anual, ua):
             except Exception as e:
                 st.error(f"No se pudo generar: {e}")
 
-        with st.expander("📥 Cargar una unidad que ya tengo en Word"):
+        with st.expander("📥 Ya tengo mi unidad en Word (importarla)"):
             st.caption("Sube tu unidad (.docx) y la IA la ordena en este formato. Lo importado queda marcado «por verificar».")
             archivo = st.file_uploader("Archivo Word", type=["docx"], key=f"up_{aid}_{n}_{ver}")
             if archivo is not None and confirmar("importar", "Convertir mi unidad", f"imp_{aid}_{n}", asig=asig):
@@ -228,11 +230,12 @@ def _unidad(asig, anual, ua):
         st.caption("Aún no hay contenido para esta unidad.")
         return
 
-    vista_previa_y_descarga(doc["id"], f"unidad_{aid}_{n}")
-    with st.expander("✏️ Editar la unidad"):
+    tab_ver, tab_edit, tab_rev = st.tabs(["👁️ Ver y descargar", "✏️ Editar", "🔎 Revisar con IA"])
+    with tab_ver:
+        vista_previa_y_descarga(doc["id"], f"unidad_{aid}_{n}")
+    with tab_edit:
         # --- Edición
         base = f"u_{aid}_{n}_{ver}"
-        st.markdown("### ✏️ Edita tu unidad")
         campo_linea("Título de la unidad", f"{base}_tit", d.get("titulo", ""))
         campo_texto("Situación significativa", f"{base}_sit", d.get("situacion", ""), 150)
 
@@ -318,7 +321,8 @@ def _unidad(asig, anual, ua):
             flash(f"Se crearon {creadas} sesión(es). Ahora ve a la pestaña Sesiones.")
             st.rerun()
 
-    with st.expander("🔎 Revisar coherencia con la planificación anual"):
+    with tab_rev:
+        st.caption("La IA revisa que tu unidad sea coherente con el sílabo anual.")
         if confirmar("revision", "Revisar con IA", f"rev_{aid}_{n}", asig=asig):
             try:
                 with st.spinner("Revisando..."):
